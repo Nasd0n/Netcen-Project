@@ -1,0 +1,10 @@
+# private TLS key - never publish
+certs/server.key
+*.key
+# macOS / Python / tool junk
+.DS_Store
+__MACOSX/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.zip
