@@ -1,5 +1,6 @@
 """End-to-end checks over real TLS sockets on localhost."""
 
+import json
 import queue
 import shutil
 import socket
@@ -133,6 +134,53 @@ class NetworkTests(unittest.TestCase):
                 Player(self.port, cert=other_cert)
         finally:
             shutil.rmtree(other_dir)
+
+    def night_match(self):
+        self.server.game.mode = "night"
+        alice, bob = Player(self.port), Player(self.port)
+        alice.wait_for("hello"); bob.wait_for("hello")
+        alice.channel.send({"type": "join", "nickname": "Alice"})
+        alice.wait_for("welcome")
+        bob.channel.send({"type": "join", "nickname": "Bob"})
+        ids = {}
+        for player in (alice, bob):
+            ids[player] = player.wait_for("state", lambda m: m["state"]["status"] == "playing")["you"]
+        with self.server.lock:
+            warder_id = next(p.player_id for p in self.server.game.players.values() if p.role == "warder")
+        warder = alice if ids[alice] == warder_id else bob
+        prisoner = bob if warder is alice else alice
+        return warder, prisoner
+
+    def test_hidden_wait_sends_the_same_messages_as_a_dark_move(self):
+        warder, prisoner = self.night_match()
+        game = self.server.game
+        received = {}
+        for action in ("right", "stay"):
+            with self.server.lock:
+                game.obstacles, game.tunnel, game.key = {(0, 9), (9, 0)}, (9, 9), (0, 5)
+                roles = {p.role: p for p in game.players.values()}
+                for player in roles.values():
+                    player.boxes, player.items = {}, []
+                roles["warder"].position, roles["prisoner"].position = (1, 1), (7, 7)
+                game.trail, game.lunge = [((7, 7), False)], False
+                game.turn_player_id = roles["warder"].player_id
+                game.turn_deadline = time.monotonic() + 10
+            warder.channel.send({"type": "move", "direction": action})
+            message = prisoner.wait_for("state", lambda m: m.get("message", "").startswith(
+                roles["warder"].nickname))
+            message["state"].pop("turn_seconds_left")
+            received[action] = message
+            self.assertNotIn("[1, 1]", json.dumps(message))
+            self.assertNotIn("[1, 2]", json.dumps(message))
+        self.assertIn("moved in the dark", received["stay"]["message"])
+        self.assertEqual(received["right"], received["stay"])
+
+    def test_scout_answers_over_the_network(self):
+        warder, prisoner = self.night_match()
+        warder.channel.send({"type": "scout"})
+        reply = warder.wait_for("scout")
+        self.assertIsInstance(reply["text"], str)
+        self.assertTrue(reply["direction"] is None or isinstance(reply["direction"], str))
 
 
 if __name__ == "__main__":

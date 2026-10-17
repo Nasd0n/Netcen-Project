@@ -325,6 +325,107 @@ class NightTests(unittest.TestCase):
         game.expire_turn()
         self.assertEqual(manhattan(before, game.players["a"].position), 1)
 
+    # ----- waiting --------------------------------------------------------
+
+    def test_prisoner_wait_ends_the_turn_like_a_step(self):
+        self.place((0, 0), (6, 6), turn="p")
+        self.game.smoke = 2
+        rounds = self.game.rounds
+        accepted, _ = self.game.move("p", "stay")
+        self.assertTrue(accepted)
+        self.assertEqual(self.prisoner.position, (6, 6))
+        self.assertEqual(self.game.turn_player_id, "w")
+        self.assertEqual(self.game.rounds, rounds + 1)          # counts toward the lockdown
+        self.assertEqual(self.game.smoke, 1)                     # smoke counts down
+        self.assertEqual(self.game.trail[-1], ((6, 6), True))    # recorded (hidden by the smoke)
+
+    def test_prisoner_wait_leaves_a_footprint(self):
+        self.place((0, 0), (6, 3), turn="p")
+        self.game.move("p", "stay")
+        for step in ("right", "right"):
+            self.game.turn_player_id = "p"
+            self.game.move("p", step)
+        self.assertEqual(self.view("w")[0]["night"]["footprints"], [[6, 3, FOOTPRINT_AGE]])
+        self.assertEqual(self.game.trail[1], ((6, 3), False))
+
+    def test_wait_counts_toward_the_lockdown(self):
+        self.place((0, 0), (6, 6), turn="p")
+        self.game.rounds = LOCKDOWN_ROUNDS - 1
+        accepted, message = self.game.move("p", "stay")
+        self.assertTrue(accepted)
+        self.assertEqual(self.game.finish_reason, "lockdown")
+        self.assertIn("Lockdown", message)
+
+    def test_wait_ends_a_sprint_and_ticks_barricades(self):
+        self.place((0, 0), (6, 6), turn="p")
+        self.prisoner.items = ["sprint"]
+        self.game.barricades = {(2, 2): 1}
+        self.game.use_item("p", "sprint")
+        self.game.move("p", "right")                 # first sprint step: still the prisoner's turn
+        self.assertEqual(self.game.turn_player_id, "p")
+        accepted, _ = self.game.move("p", "stay")    # waiting ends the sprint
+        self.assertTrue(accepted)
+        self.assertEqual(self.prisoner.position, (6, 7))
+        self.assertEqual(self.game.turn_player_id, "w")
+        self.assertEqual(self.game.sprint_steps, 0)
+        self.assertEqual(self.game.barricades, {})
+
+    def test_warder_wait_never_gives_the_extra_grab(self):
+        self.place((3, 3), (4, 4))                   # prisoner in the light at the start of the turn
+        self.game.searchlight = 2
+        accepted, _ = self.game.move("w", "stay")
+        self.assertTrue(accepted)
+        self.assertFalse(self.game.lunge)
+        self.assertEqual(self.game.status, "playing")
+        self.assertEqual(self.game.turn_player_id, "p")
+        self.assertEqual(self.game.searchlight, 1)   # the searchlight counts down as usual
+
+    def test_grabbing_at_the_start_of_the_turn_still_works(self):
+        self.place((3, 3), (4, 4))
+        accepted, _ = self.game.catch("w", [4, 4])
+        self.assertTrue(accepted)
+        self.assertEqual(self.game.winner_id, "w")
+
+    def test_no_wait_after_a_step_that_spots_them(self):
+        self.place((3, 3), (5, 4))
+        self.game.move("w", "down")                  # spotted: one click to grab
+        accepted, _ = self.game.move("w", "stay")
+        self.assertFalse(accepted)
+        self.assertTrue(self.game.lunge)
+
+    def test_hidden_wait_looks_exactly_like_a_dark_move(self):
+        def warder_turn(action):
+            game = EscapeGame(seed=5, mode="night")
+            game.add_player("w", "Wendy"); game.add_player("p", "Pat")
+            game.start_match(forced_warder_id="w")
+            game.obstacles, game.tunnel, game.key = {(0, 9), (9, 0)}, (9, 9), (0, 5)
+            for player in game.players.values():
+                player.boxes, player.items = {}, []
+            game.players["w"].position, game.players["p"].position = (1, 1), (7, 7)
+            game.trail, game.turn_player_id = [((7, 7), False)], "w"
+            game.turn_deadline = time.monotonic() + 10
+            accepted, message = game.move("w", action)
+            self.assertTrue(accepted)
+            view = game.snapshot("p")
+            view.pop("turn_seconds_left")
+            return message, view
+
+        moved, waited = warder_turn("right"), warder_turn("stay")
+        self.assertEqual(moved[0], waited[0])
+        self.assertIn("moved in the dark", waited[0])
+        self.assertEqual(moved[1], waited[1])
+
+    def test_visible_wait_is_announced(self):
+        self.place((4, 4), (6, 6))                   # the prisoner can see the warder (2 away)
+        accepted, message = self.game.move("w", "stay")
+        self.assertTrue(accepted)
+        self.assertEqual(message, "Wendy waited. Pat's turn.")
+
+    def test_scout_can_tell_the_warder_to_wait_at_the_tunnel(self):
+        self.place((8, 9), (2, 2))                   # already guarding, prisoner out of sight
+        self.game.trail = [((2, 2), True)]
+        self.assertEqual(suggest_direction(self.game.snapshot("w"), "w"), "stay")
+
     # ----- dealing --------------------------------------------------------
 
     def test_deals_are_fair(self):

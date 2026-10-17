@@ -14,7 +14,7 @@ import tkinter as tk
 from typing import Optional
 
 import security
-from ai import suggest_direction, suggest_move
+from ai import WAIT, advise
 from config import SERVER_HOST, SERVER_PORT
 from protocol import PING_EVERY, Channel, open_tls
 from theme import (
@@ -40,6 +40,7 @@ KEYS = {
     "w": "up", "a": "left", "s": "down", "d": "right",
     "Up": "up", "Left": "left", "Down": "down", "Right": "right",
     "q": "up-left", "e": "up-right", "z": "down-left", "c": "down-right",
+    "space": WAIT,
 }
 
 
@@ -320,6 +321,8 @@ class EscapeClient:
         self.lockdown_label = tk.Label(words, text="", bg=CARD, fg=BAD, font=Fonts.get(11, "bold"),
                                        anchor="w")
         self.lockdown_label.pack(fill="x")
+        self.wait_button = PillButton(words, "Wait  (Space)", command=lambda: self.move(WAIT),
+                                      color=INK, width=150, height=30, font_size=10)
 
         # Scout AI
         scout = card(right, fill="x", pady=(12, 0))
@@ -498,7 +501,8 @@ class EscapeClient:
                 elif state.get("night") and role == "warder" and state["night"].get("smoke_turns"):
                     self.turn_hint.configure(text="They threw smoke. You can't see them unless they're right beside you.")
                 else:
-                    self.turn_hint.configure(text="Click a highlighted square, or use the arrow keys / WASD.")
+                    self.turn_hint.configure(text="Click a highlighted square, or use the arrow keys / WASD."
+                                             + (" Space waits." if state.get("allow_wait") else ""))
             else:
                 self.turn_title.configure(text="%s's move" % other.get("nickname", "Their"))
                 self.turn_hint.configure(text="They have 10 seconds. Plan your next step.")
@@ -594,6 +598,13 @@ class EscapeClient:
         else:
             self.rematch_button.configure_button(enabled=True, text="Rematch")
         self.scout_button.configure_button(enabled=self._my_turn())
+        can_wait = bool(state.get("allow_wait")) and state.get("status") == "playing"
+        if can_wait and not self.wait_button.winfo_manager():
+            self.wait_button.pack(anchor="w", pady=(6, 0))
+        elif not can_wait and self.wait_button.winfo_manager():
+            self.wait_button.pack_forget()
+        lunge = ((state.get("night") or {}).get("lunge"))
+        self.wait_button.configure_button(enabled=self._my_turn() and not lunge)
 
     def _add_feed(self, text: str) -> None:
         self.feed.insert(0, text)
@@ -703,7 +714,8 @@ class EscapeClient:
         mine = (me["row"], me["col"]) if me.get("row") is not None else None
         hint_cell = None
         if self.hint_direction and mine:
-            dr, dc = STEPS.get(self.hint_direction) or DIAGONALS[self.hint_direction]
+            dr, dc = (0, 0) if self.hint_direction == WAIT else \
+                (STEPS.get(self.hint_direction) or DIAGONALS[self.hint_direction])
             hint_cell = (mine[0] + dr, mine[1] + dc)
         last = state.get("last_move") or {}
         night = night or {}
@@ -792,7 +804,8 @@ class EscapeClient:
                 if targets.get((r, c)) == "catch":
                     draw_reticle(canvas, cx, cy, cell)
                 if (r, c) == hint_cell:
-                    canvas.create_text(cx, y1 + (7 if small else 12), text="Scout", fill="#9dbbf0",
+                    label = "Wait" if self.hint_direction == WAIT else "Scout"
+                    canvas.create_text(cx, y1 + (7 if small else 12), text=label, fill="#9dbbf0",
                                        font=Fonts.get(8 if small else 10, "bold"))
                     rounded_rect(canvas, x1 + 2, y1 + 2, x2 - 2, y2 - 2, radius=max(3, radius - 2),
                                  fill="", outline=WARDER, width=3, dash=(6, 4))
@@ -920,8 +933,8 @@ class EscapeClient:
     def ask_scout(self) -> None:
         if self.state is None or self.player_id is None:
             return
-        self.hint_direction = suggest_direction(self.state, self.player_id)
-        self.scout_text.configure(text=suggest_move(self.state, self.player_id) or "Scout has no idea.")
+        text, self.hint_direction = advise(self.state, self.player_id)
+        self.scout_text.configure(text=text)
         self._draw_board()
 
     # ----- misc ------------------------------------------------------------

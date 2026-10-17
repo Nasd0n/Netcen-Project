@@ -97,6 +97,17 @@ class WebTests(unittest.TestCase):
         _, head = ws_connect(self.web.port, self.web.key, origin="https://evil.example")
         self.assertIn("403", head)
 
+    def test_browser_scout_comes_from_the_server(self):
+        sock, head = ws_connect(self.web.port, self.web.key)
+        self.assertEqual(ws_read(sock)["type"], "hello")
+        ws_send(sock, {"type": "join", "nickname": "Webby"})
+        ws_read(sock); ws_read(sock)                  # welcome + state
+        ws_send(sock, {"type": "scout"})
+        reply = ws_read(sock)
+        self.assertEqual(reply["type"], "scout")
+        self.assertIn("match is in progress", reply["text"])      # no match yet
+        self.assertIsNone(reply["direction"])
+
     def test_browser_player_joins_and_gets_state(self):
         sock, head = ws_connect(self.web.port, self.web.key)
         self.assertIn("101", head)

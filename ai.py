@@ -27,6 +27,7 @@ DIAGONALS = (
     ("down-right", (1, 1)),
 )
 ALL_NAMES = {name for name, _ in DIRECTIONS + DIAGONALS}
+WAIT = "stay"          # the move name for waiting (game.WAIT)
 
 
 def _inside(position: tuple[int, int], size: int) -> bool:
@@ -90,15 +91,23 @@ def _ring(center: tuple[int, int], size: int) -> set[tuple[int, int]]:
     }
 
 
-def suggest_direction(state: dict, player_id: str) -> str | None:
-    """Just the direction Scout would pick ("up", "down-left", ...), if any."""
+def advise(state: dict, player_id: str) -> tuple[str, str | None]:
+    """Scout's hint as (text, move). The move is a direction, "stay" or None."""
 
-    text = suggest_move(state, player_id) or ""
+    text = suggest_move(state, player_id) or "Scout has no idea."
     words = text.split()
+    if words and words[0].rstrip(":") == "Wait":
+        return text, WAIT
     if len(words) < 2 or words[0] not in {"Move", "Grab"}:
-        return None
+        return text, None
     word = words[1].rstrip(":").lower()
-    return word if word in ALL_NAMES else None
+    return text, (word if word in ALL_NAMES else None)
+
+
+def suggest_direction(state: dict, player_id: str) -> str | None:
+    """Just the move Scout would pick ("up", "down-left", "stay", ...), if any."""
+
+    return advise(state, player_id)[1]
 
 
 def suggest_move(state: dict, player_id: str) -> str | None:
@@ -149,9 +158,11 @@ def suggest_move(state: dict, player_id: str) -> str | None:
                 path = _path(board, start, goal, blocked | (danger - {start}))
                 if path and len(path) >= 2:
                     return _prisoner_text(start, path, goal, goal_name)
-                return "Every route passes too close to the warder. Wait them out, or use an item."
+                return _back_off(state, board, start, opponent_position, blocked)
         path = _path(board, start, goal, blocked)
         if path is None or len(path) < 2:
+            if state.get("allow_wait"):
+                return "Wait: no safe route to the %s is open right now." % goal_name
             return "No safe route to the %s is visible." % goal_name
         return _prisoner_text(start, path, goal, goal_name)
 
@@ -181,6 +192,8 @@ def suggest_move(state: dict, player_id: str) -> str | None:
             if best and len(best) >= 2:
                 return "Move %s: can't see them, so guard the tunnel." % (
                     _direction_between(start, best[1]).upper())
+            if state.get("allow_wait"):
+                return "Wait: you're guarding the tunnel. Stay put and listen."
             return "You're guarding the tunnel. Stay close and listen."
 
         if night and max(abs(opponent_position[0] - start[0]), abs(opponent_position[1] - start[1])) == 1:
@@ -188,6 +201,8 @@ def suggest_move(state: dict, player_id: str) -> str | None:
                 _direction_between(start, opponent_position).upper())
         path = _path(board, start, opponent_position, {target})
         if path is None or len(path) < 2:
+            if state.get("allow_wait"):
+                return "Wait: no direct route to the prisoner is open right now."
             return "No direct route to the prisoner is visible."
         direction = _direction_between(start, path[1])
         if path[1] == opponent_position:
@@ -198,6 +213,27 @@ def suggest_move(state: dict, player_id: str) -> str | None:
         )
 
     return "Scout AI is waiting for your role."
+
+
+def _back_off(state, board, start, warder, blocked) -> str:
+    """Night prisoner with no safe route: hold still, or step away from the warder."""
+
+    night_info = state.get("night") or {}
+    barricades = {(r, c) for r, c, _ in night_info.get("barricades", [])}
+    options = [(None, start)] if state.get("allow_wait") else []
+    for name, (dr, dc) in DIRECTIONS:
+        cell = (start[0] + dr, start[1] + dc)
+        if _inside(cell, len(board)) and board[cell[0]][cell[1]] != "#" \
+                and cell not in blocked and cell not in barricades:
+            options.append((name, cell))
+    if not options:
+        return "Every route passes too close to the warder. Use an item if you have one."
+    # Furthest from the warder wins; staying put wins ties (it leaves no new footprint).
+    name, _ = max(options, key=lambda o: (max(abs(o[1][0] - warder[0]), abs(o[1][1] - warder[1])),
+                                          o[0] is None))
+    if name is None:
+        return "Wait: every route passes too close to the warder, so hold still."
+    return "Move %s: every route is too close to the warder, so back away." % name.upper()
 
 
 def _prisoner_text(start, path, goal, goal_name="tunnel") -> str:

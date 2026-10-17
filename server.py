@@ -17,6 +17,7 @@ from tkinter import messagebox
 from typing import Callable, Optional
 
 import security
+from ai import WAIT, advise
 from config import SERVER_PORT, WEB_PORT
 from game import DIAGONALS, MODE_NAMES, MODES, EscapeGame
 from protocol import IDLE_LIMIT, Channel
@@ -35,7 +36,7 @@ MAX_CONNECTIONS = 8          # players + people sitting on the name screen
 HANDSHAKE_TIMEOUT = 8
 JOIN_TIMEOUT = 90
 MESSAGES_PER_SECOND = 8
-MOVES = {"up", "down", "left", "right", *DIAGONALS}
+MOVES = {"up", "down", "left", "right", WAIT, *DIAGONALS}
 
 
 class ClientSession:
@@ -244,6 +245,13 @@ class GameServer:
                 self.broadcast(text)
             else:
                 session.send({"type": "error", "message": text})
+        elif kind == "scout":
+            # Browser players ask the server for Scout's hint. It only ever
+            # looks at this player's own view, so it can't reveal anything.
+            with self.lock:
+                view = self.game.snapshot(session.player_id)
+            text, direction = advise(view, session.player_id)
+            session.send({"type": "scout", "text": text, "direction": direction})
         else:
             session.send({"type": "error", "message": "Unknown request."})
 

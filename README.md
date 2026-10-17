@@ -68,13 +68,14 @@ Browser players and desktop (`client.py`) players can play against each other. Y
 - The server picks the roles at random. The warder always moves first.
 - Starting spots are random but fair: the two players start at least 3 steps apart, and the prisoner starts at least 3 steps from the tunnel.
 - You get 10 seconds per turn. To move, click a highlighted square or use the arrow keys / WASD.
+- Instead of moving you can **wait** (the Wait button or Space). A wait uses up your turn exactly like a move, you just stay on your square. Both players can wait, in both modes. To play the assignment's original rule (you must move every turn), set `ALLOW_WAIT = False` in `game.py`.
 - The warder can't enter the tunnel, and the prisoner can't walk into the warder.
 - The winner gets +1. If both players press Rematch, the last winner plays warder next.
 - The server's Reset button starts a fresh match and sets both scores back to 0.
 
 ## Night Escape mode
 
-Classic mode is the assignment's game, unchanged: 5×5, 5 walls, 1 tunnel. Night Escape is an extra mode. Switch between them on the server dashboard at any time; switching starts a new match and keeps the scores.
+Classic mode is the assignment's game: 5×5, 5 walls, 1 tunnel, the warder moves first, up/down/left/right only, 10-second turns. The one addition is waiting (see above), which `ALLOW_WAIT = False` turns off again. Night Escape is an extra mode. Switch between them on the server dashboard at any time; switching starts a new match and keeps the scores.
 
 In Classic, a careful prisoner almost always gets away. Night Escape was designed by solving and simulating thousands of games (an exact solver plus bots). Every rule below is there for a reason.
 
@@ -86,11 +87,12 @@ In Classic, a careful prisoner almost always gets away. Night Escape was designe
 | **Footprints** | The warder sees where the prisoner stood 2 turns ago, anywhere on the map (smoke hides it). Without footprints the warder just camped at the tunnel. |
 | **Items** | The prisoner starts every match with a **Smoke bomb**. There are 4 item boxes on the map, 2 per player, and each player only sees their own. Each box shows the item inside: every player gets one box of each of their items. Warder: **Searchlight** (lights the whole yard for 2 warder turns) and **Barricade** (blocks a square within 2 for 3 rounds). Prisoner: **Smoke bomb** (invisible, no footprints, can't be seen for 3 moves) and **Sprint** (2 steps in one turn). |
 | **Lockdown** | If the prisoner hasn't escaped after 60 rounds, the prison locks down and the warder wins. |
+| **Waiting** | Both sides may wait. A prisoner's wait ends their turn like a step: it leaves a footprint, counts down smoke, counts toward the lockdown, ticks barricades and ends a sprint. A warder's wait never gives the step-and-grab extra click (that only follows a step). A wait the other side can't see is announced and sent exactly like a move in the dark, so the network messages don't give it away. |
 | **Fair deals** | The warder starts at least as close to the tunnel as the prisoner, but never right next to it. An exact game-tree solver (`solver.py`) rejects any deal where the prisoner could escape by force. |
 
 Both sides' views are filtered on the server. The warder never receives the prisoner's position or the key while it's dark, and the prisoner never receives a warder who is out of sight. Moves in the dark are announced without a direction, so a modified client can't cheat by reading network traffic.
 
-**Timeouts (both modes):** if a player doesn't move within 10 seconds, they take a random legal step. A prisoner's random step avoids the lantern when it can.
+**Timeouts (both modes):** if a player doesn't move within 10 seconds, they take a random legal step, never a wait, so going idle isn't rewarded. A prisoner's random step avoids the lantern when it can.
 
 ## Security
 
@@ -125,7 +127,8 @@ After that, copy the new `certs/server.crt` to the clients again.
 
 | Feature | AI? |
 | --- | --- |
-| Scout: a breadth-first-search hint that shows the best next square on the board. In Night Escape it plans around the grab zone, and a warder who can't see follows the footprints. | ✓ |
+| Scout: a breadth-first-search hint that shows the best next square on the board, or tells you to wait when staying put is best. In Night Escape it plans around the grab zone, and a warder who can't see follows the footprints. Browser players get the same hint from the server (`ai.py`), computed only from their own view. | ✓ |
+| Wait instead of moving (button or Space), with `ALLOW_WAIT` to switch back to the must-move rule | |
 | Night Escape: exact game-tree solver that deals only fair starts (no forced wins) | ✓ |
 | Night Escape mode: 10×10 fog of war for both sides, with server-side hidden information | |
 | Night Escape: secret key that unlocks the tunnel | |

@@ -25,6 +25,11 @@ from solver import prisoner_forced_wins
 TURN_SECONDS = 10
 NICKNAME_MAX = 16
 
+# Either player may wait (stay put) instead of moving. Set to False for the
+# original assignment rules, where a player has to move every turn.
+ALLOW_WAIT = True
+WAIT = "stay"
+
 MODES = ("classic", "night")
 MODE_NAMES = {"classic": "Classic", "night": "Night Escape"}
 BOARD_SIZES = {"classic": 5, "night": 10}
@@ -238,6 +243,8 @@ class EscapeGame:
         other = self._other(player_id)
         name = direction.strip().lower()
 
+        if name == WAIT:
+            return self._wait(player, other)
         if name in DIAGONALS:
             dr, dc = DIAGONALS[name]
             return self.catch(player_id, (player.position[0] + dr, player.position[1] + dc))
@@ -314,6 +321,33 @@ class EscapeGame:
             self.turn_deadline = time.monotonic() + TURN_SECONDS
             return f"{player.nickname} is sprinting..."
         return self._end_prisoner_turn(player, other)
+
+    def _wait(self, player: Player, other: Player) -> tuple[bool, str]:
+        """Stay put. It uses up the turn exactly like a step would."""
+
+        if not ALLOW_WAIT:
+            return False, "You have to move every turn."
+        if self.lunge:
+            return False, "You already moved. Click the prisoner to grab them!"
+        self.last_move = None
+        if not self.night:
+            self._switch_turn()
+            return True, f"{player.nickname} waited. {other.nickname}'s turn."
+
+        # In the dark a wait must look exactly like a step, unless the other
+        # side can see you standing there anyway.
+        if player.role == "prisoner":
+            seen = self.prisoner_visible_to_warder()
+            self._pick_up(player)
+            text = self._end_prisoner_turn(player, other)   # footprints, smoke, rounds, barricades
+        else:
+            seen = self.warder_visible_to_prisoner()
+            self._pick_up(player)
+            self._switch_turn()                             # never a step-and-grab
+            text = f"{player.nickname} moved in the dark. {other.nickname}'s turn."
+        if seen and self.status == "playing":
+            text = f"{player.nickname} waited. {other.nickname}'s turn."
+        return True, text
 
     def _end_prisoner_turn(self, prisoner: Player, warder: Player) -> str:
         self.sprint_steps = 0
@@ -579,6 +613,7 @@ class EscapeGame:
             "status": self.status,
             "mode": self.mode,
             "mode_name": MODE_NAMES[self.mode],
+            "allow_wait": ALLOW_WAIT,
             "size": self.size,
             "match_number": self.match_number,
             "board": ["".join(row) for row in board],
