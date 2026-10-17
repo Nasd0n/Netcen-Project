@@ -137,6 +137,7 @@ class EscapeGame:
         self.last_move: dict | None = None
         self.finish_reason: str | None = None
         self.role_note: str | None = None       # how roles were decided for this match
+        self.last_winner_id: str | None = None  # latest finished match; kept across mode switches
         self._reset_night_state()
         self._generate_map()
 
@@ -174,6 +175,8 @@ class EscapeGame:
 
     def remove_player(self, player_id: str) -> None:
         self.players.pop(player_id, None)
+        if player_id == self.last_winner_id:
+            self.last_winner_id = None
         self._set_waiting()
 
     def set_mode(self, mode: str) -> bool:
@@ -209,8 +212,9 @@ class EscapeGame:
         """Warder for the next match, and a line telling both players why.
 
         Picks that fit together (Warder+Prisoner, Warder+Either, Prisoner+Either)
-        decide the roles. Otherwise the usual rule applies: ``fallback_id`` (the
-        last winner, on a rematch) or a random player.
+        decide the roles. If both want the same role, the last winner in the room
+        gets it. If both picked Either, the usual rule applies: ``fallback_id``
+        (the last winner, on a rematch) or a random player.
         """
 
         first, second = self.players.values()
@@ -220,6 +224,8 @@ class EscapeGame:
             else:                           # Prisoner + Either
                 warder = second if first.side == "prisoner" else first
             return warder.player_id, f"Sides as picked: {warder.nickname} is the warder."
+        if first.side != "any":
+            return self._settle_same_pick(first.side)
 
         if fallback_id in self.players:
             rule = "last match's winner plays warder"
@@ -227,9 +233,23 @@ class EscapeGame:
         else:
             rule = "roles were picked at random"
             warder_id = self.random.choice(list(self.players))
-        if first.side == "any":
-            return warder_id, f"Neither of you picked a side, so {rule}."
-        return warder_id, f"You both picked {SIDE_NAMES[first.side]}, so {rule}."
+        return warder_id, f"Neither of you picked a side, so {rule}."
+
+    def _settle_same_pick(self, side: str) -> tuple[str, str]:
+        """Both want ``side``: the last winner gets it, or it is random if there is none."""
+
+        wanted = SIDE_NAMES[side]
+        winner = self.players.get(self.last_winner_id)
+        if winner is None:
+            # Only a finished match scores, so a score here means the last winner left.
+            why = "the last winner has left" if any(p.score for p in self.players.values()) \
+                else "nobody has won yet"
+            return (self.random.choice(list(self.players)),
+                    f"You both picked {wanted} and {why}, so it was decided at random.")
+        loser = next(p for p in self.players.values() if p is not winner)
+        warder = winner if side == "warder" else loser
+        return warder.player_id, (f"You both picked {wanted}. {winner.nickname} won the last match, "
+                                  f"so {winner.nickname} is the {side}.")
 
     def start_match(self, forced_warder_id: str | None = None) -> bool:
         """Deal a new match. ``forced_warder_id`` is the fallback warder (rematch)."""
@@ -546,6 +566,7 @@ class EscapeGame:
             player.boxes = {}
 
         self.winner_id = None
+        self.last_winner_id = None
         self.rematch_votes.clear()
         self._set_waiting()
 
@@ -790,6 +811,7 @@ class EscapeGame:
         self.status = "finished"
         self.finish_reason = reason
         self.winner_id = winner_id
+        self.last_winner_id = winner_id
         self.players[winner_id].score += 1
         self.turn_player_id = None
         self.turn_deadline = None

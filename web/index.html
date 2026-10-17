@@ -486,7 +486,7 @@ function sideStatus() {
   if (!o.id) return "Your pick is used when the next match starts.";
   const theirs = o.side || "any";
   let text = `${o.nickname} wants: ${SIDE_LABEL[theirs] || "Either"}.`;
-  if (theirs === side && theirs !== "any") text += " Same pick, so the usual rule decides.";
+  if (theirs === side && theirs !== "any") text += " Same pick, so the last winner gets it.";
   return text;
 }
 function renderSides() {

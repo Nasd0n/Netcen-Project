@@ -629,7 +629,7 @@ class EscapeClient:
         theirs = other.get("side", "any")
         text = "%s wants: %s." % (other.get("nickname", "Your opponent"), SIDE_LABELS.get(theirs, "Either"))
         if theirs == self.side and theirs != "any":
-            text += " Same pick, so the usual rule decides."
+            text += " Same pick, so the last winner gets it."
         return text
 
     def _render_side(self) -> None:
