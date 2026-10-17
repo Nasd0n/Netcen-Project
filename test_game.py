@@ -1,7 +1,7 @@
 import unittest
 import time
 
-from game import EscapeGame, OBSTACLE_COUNT, clean_nickname
+from game import EscapeGame, OBSTACLE_COUNT, SIDES, clean_nickname
 
 
 class EscapeGameTests(unittest.TestCase):
@@ -147,6 +147,102 @@ class EscapeGameTests(unittest.TestCase):
         snap = self.game.snapshot()
         self.assertEqual(snap["finish_reason"], "caught")
         self.assertEqual(snap["last_move"]["to"], list(prisoner.position))
+
+
+class SidePickTests(unittest.TestCase):
+    """Players pick Warder, Prisoner or Either; picks apply when a match starts."""
+
+    def new_game(self, side_a, side_b, seed=3, mode="classic"):
+        game = EscapeGame(seed=seed, mode=mode)
+        game.add_player("a", "Alice", side_a)
+        game.add_player("b", "Bob", side_b)
+        game.start_match()
+        return game
+
+    def rematch(self, game, winner):
+        game._finish(winner, "escaped")
+        game.request_rematch("a")
+        accepted, message = game.request_rematch("b")
+        self.assertTrue(accepted)
+        return message
+
+    def test_picks_that_fit_decide_the_roles(self):
+        expected_warder = {
+            ("warder", "prisoner"): "a", ("prisoner", "warder"): "b",
+            ("warder", "any"): "a", ("any", "warder"): "b",
+            ("prisoner", "any"): "b", ("any", "prisoner"): "a",
+        }
+        for (side_a, side_b), warder in expected_warder.items():
+            for seed in range(5):
+                game = self.new_game(side_a, side_b, seed)
+                self.assertEqual(game.players[warder].role, "warder", (side_a, side_b))
+                self.assertEqual(game.turn_player_id, warder)        # the warder still moves first
+                self.assertIn("Sides as picked", game.role_note)
+
+    def test_same_picks_fall_back_to_random_for_a_first_match(self):
+        for pick in SIDES:
+            warders = set()
+            for seed in range(20):
+                game = self.new_game(pick, pick, seed)
+                warders.add(game.turn_player_id)
+                self.assertIn("picked at random", game.role_note)
+            self.assertEqual(warders, {"a", "b"}, pick)
+        self.assertEqual(self.new_game("warder", "warder").role_note,
+                         "You both picked Warder, so roles were picked at random.")
+        self.assertEqual(self.new_game("any", "any").role_note,
+                         "Neither of you picked a side, so roles were picked at random.")
+
+    def test_same_picks_fall_back_to_the_last_winner_on_a_rematch(self):
+        for pick in SIDES:
+            for winner in ("a", "b"):
+                game = self.new_game(pick, pick)
+                message = self.rematch(game, winner)
+                self.assertEqual(game.players[winner].role, "warder", pick)
+                self.assertIn("last match's winner plays warder", message)
+
+    def test_picks_beat_the_winner_rule_on_a_rematch(self):
+        game = self.new_game("any", "any")
+        game.set_side("b", "warder")
+        self.rematch(game, "a")
+        self.assertEqual(game.players["b"].role, "warder")
+        self.assertIn("Sides as picked", game.role_note)
+
+    def test_a_change_waits_for_the_next_match(self):
+        game = self.new_game("warder", "prisoner")
+        game.set_side("a", "prisoner")
+        game.set_side("b", "warder")
+        self.assertEqual(game.players["a"].role, "warder")          # this match is untouched
+        sides = {p["id"]: p["side"] for p in game.snapshot("b")["players"]}
+        self.assertEqual(sides, {"a": "prisoner", "b": "warder"})   # but both can see the new picks
+        game.reset_game()                                           # server reset starts the next match
+        self.assertEqual(game.players["b"].role, "warder")
+        game.set_mode("night")                                      # and so does a mode switch
+        self.assertEqual(game.players["b"].role, "warder")
+
+    def test_unknown_sides_are_rejected(self):
+        game = self.new_game("any", "any")
+        for bad in ("boss", "", "Warder", None):
+            with self.assertRaises(ValueError):
+                game.set_side("a", bad)
+        with self.assertRaises(ValueError):
+            EscapeGame().add_player("x", "Xena", "king")
+        self.assertEqual(game.players["a"].side, "any")
+
+    def test_picks_work_in_night_escape_and_stay_visible_in_the_dark(self):
+        game = self.new_game("prisoner", "any", seed=4, mode="night")
+        self.assertEqual(game.players["b"].role, "warder")
+        warder_view = game.snapshot("b")
+        prisoner = next(p for p in warder_view["players"] if p["id"] == "a")
+        self.assertIsNone(prisoner["row"])                  # position hidden...
+        self.assertEqual(prisoner["side"], "prisoner")      # ...the pick is not secret
+
+    def test_server_swap_flips_the_picks(self):
+        game = self.new_game("any", "any")
+        old_warder = game.turn_player_id
+        self.assertTrue(game.swap_sides())
+        self.assertEqual(game.players[old_warder].side, "prisoner")
+        self.rematch(game, old_warder)                       # winner would be warder without the swap
+        self.assertEqual(game.players[old_warder].role, "prisoner")
 
 
 if __name__ == "__main__":

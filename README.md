@@ -9,7 +9,7 @@ Written in Python 3.9+ with Tkinter. All traffic between the client and server i
 | File | What it does |
 | --- | --- |
 | `server.py` | Socket server + dashboard window (who's online, live map, reset button) |
-| `client.py` | Player window: nickname screen, board, timer, Scout hints, rematch |
+| `client.py` | Player window: nickname and side screen, board, timer, Scout hints, rematch |
 | `game.py` | Game rules: map generation, turns, timer, win checks, scores |
 | `ai.py` | Scout, the path-finding helper (breadth-first search) |
 | `solver.py` | Exact Night Escape solver used to deal fair starts |
@@ -65,12 +65,14 @@ Browser players and desktop (`client.py`) players can play against each other. Y
 ## How to play
 
 - The board is 5×5, with 19 open squares, 5 walls and 1 tunnel. Every new match gets a new random map. The server checks that every open square can be reached, so the map is never deadlocked.
-- The server picks the roles at random. The warder always moves first.
+- Pick a side: **Warder**, **Prisoner** or **Either** (the default). You choose on the nickname screen and can change it any time on the game screen, including on the Win/Lost card before pressing Rematch. You can see what your opponent picked.
+- A pick takes effect when the next match starts (rematch, mode switch or server reset), never in the middle of a match. Picks that fit together (Warder + Prisoner, Warder + Either, Prisoner + Either) decide the roles. If you both picked the same side, or both picked Either, the usual rule decides: random roles for a first match, and the last winner plays warder on a rematch. Both players are told which rule was used.
+- The warder always moves first.
 - Starting spots are random but fair: the two players start at least 3 steps apart, and the prisoner starts at least 3 steps from the tunnel.
 - You get 10 seconds per turn. To move, click a highlighted square or use the arrow keys / WASD.
 - The warder can't enter the tunnel, and the prisoner can't walk into the warder.
-- The winner gets +1. If both players press Rematch, the last winner plays warder next.
-- The server's Reset button starts a fresh match and sets both scores back to 0.
+- The winner gets +1. If both players press Rematch, a new match starts with roles decided as above.
+- The server's Reset button starts a fresh match and sets both scores back to 0. Its **Swap sides next match** button sets both players' picks to the opposite of their current roles.
 
 ## Night Escape mode
 
@@ -99,7 +101,7 @@ Everything goes over TLS (1.2 or newer; on current Python it negotiates TLS 1.3)
 - **Encryption:** someone else on the same Wi-Fi can't read or change the moves or nicknames.
 - **Server identity (certificate pinning):** the client only trusts the exact certificate in `certs/server.crt`. It also checks the SHA-256 fingerprint after the handshake. A fake server that doesn't have `server.key` is rejected, even if it uses the same IP address. The first few bytes of the fingerprint appear on the server dashboard, so you can compare them.
 - **Plain TCP is refused:** a connection that doesn't complete a TLS handshake within 8 seconds is dropped.
-- **Input limits:** messages over 4 KB, more than 8 messages per second, unknown commands and invalid directions are all rejected. Nicknames are cleaned (no control characters, max 16 characters, no duplicates).
+- **Input limits:** messages over 4 KB, more than 8 messages per second, unknown commands, invalid directions and unknown sides are all rejected. Nicknames are cleaned (no control characters, max 16 characters, no duplicates).
 - **Timeouts:** the server disconnects clients that don't pick a name within 90 seconds or stay silent for 45 seconds. Clients send a small keep-alive every 15 seconds. At most 8 connections are allowed at once.
 - **Server-side rules:** the server checks every move. A modified client can't teleport or move out of turn.
 
@@ -137,6 +139,7 @@ After that, copy the new `certs/server.crt` to the clients again.
 | Public invite link: play in any browser, even on a phone, via a secure tunnel | |
 | Click-to-move with highlighted legal squares | |
 | Lobby: see who's online before joining, with live updates | |
+| Choose your side (Warder, Prisoner or Either), see your opponent's pick, swap sides from the server dashboard | |
 | Server dashboard with a live mini-map of the current match | |
 | Fair random starting positions | |
 | Countdown ring timer, footprints showing the last move, and a Win/Lost card | |
@@ -148,7 +151,7 @@ After that, copy the new `certs/server.crt` to the clients again.
 python3 -m pytest -q
 ```
 
-The tests cover the game rules, Scout, and real TLS connections on localhost. The TLS tests check that two players can join and play, that moves out of turn are refused, that plain TCP and oversized messages are rejected, and that the client refuses a server with the wrong certificate. The Night Escape tests cover:
+The tests cover the game rules, Scout, and real TLS connections on localhost. The side-picking tests cover every combination of picks, the random and last-winner fallbacks, and that a change waits for the next match. The TLS tests check that two players can join and play, that side picks travel both ways and bad ones are refused, that moves out of turn are refused, that plain TCP and oversized messages are rejected, and that the client refuses a server with the wrong certificate. The Night Escape tests cover:
 - what each role can see
 - the key and the locked tunnel
 - the lock-on grab and the extra click after a step
@@ -156,4 +159,4 @@ The tests cover the game rules, Scout, and real TLS connections on localhost. Th
 - all four items, private boxes and the lockdown
 - random steps on timeout, and fair dealing (checked against the solver)
 - Scout's night advice
-- that neither side's real network messages leak hidden positions There are also browser-side tests: a wrong invite key or another website's origin gets a 403, only the game page is served, and a browser player can join and get the game state.
+- that neither side's real network messages leak hidden positions There are also browser-side tests: a wrong invite key or another website's origin gets a 403, only the game page is served, and a browser player can join, get the game state and pick a side.

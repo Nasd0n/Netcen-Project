@@ -56,6 +56,10 @@ ITEMS_FOR_ROLE = {"warder": ("searchlight", "barricade"), "prisoner": ("smoke", 
 ITEM_NAMES = {"searchlight": "Searchlight", "barricade": "Barricade",
               "smoke": "Smoke bomb", "sprint": "Sprint"}
 
+# Which side each player would like to play. Picks are read when a match starts.
+SIDES = ("warder", "prisoner", "any")
+SIDE_NAMES = {"warder": "Warder", "prisoner": "Prisoner", "any": "Either"}
+
 
 DIRECTIONS = {
     "up": (-1, 0),
@@ -109,6 +113,7 @@ class Player:
     role: str | None = None
     position: Cell | None = None
     score: int = 0
+    side: str = "any"
     items: list[str] = field(default_factory=list)
     boxes: dict[Cell, str] = field(default_factory=dict)   # square -> item inside
 
@@ -131,6 +136,7 @@ class EscapeGame:
         self.match_number = 0
         self.last_move: dict | None = None
         self.finish_reason: str | None = None
+        self.role_note: str | None = None       # how roles were decided for this match
         self._reset_night_state()
         self._generate_map()
 
@@ -153,7 +159,9 @@ class EscapeGame:
     # Players and matches
     # ------------------------------------------------------------------
 
-    def add_player(self, player_id: str, nickname: str) -> None:
+    def add_player(self, player_id: str, nickname: str, side: str = "any") -> None:
+        if side not in SIDES:
+            raise ValueError("Pick Warder, Prisoner or Either.")
         if len(self.players) >= 2:
             raise ValueError("Sorry, this room already has two players.")
         clean_name = clean_nickname(nickname)
@@ -162,7 +170,7 @@ class EscapeGame:
         taken = {player.nickname.casefold() for player in self.players.values()}
         if clean_name.casefold() in taken:
             raise ValueError("Someone is already using that name. Try another one.")
-        self.players[player_id] = Player(player_id, clean_name)
+        self.players[player_id] = Player(player_id, clean_name, side=side)
 
     def remove_player(self, player_id: str) -> None:
         self.players.pop(player_id, None)
@@ -177,15 +185,62 @@ class EscapeGame:
         self.size = BOARD_SIZES[mode]
         return self.start_match() if len(self.players) == 2 else False
 
+    def set_side(self, player_id: str, side: str) -> str:
+        """Remember a player's pick. It is used when the next match starts."""
+
+        if side not in SIDES:
+            raise ValueError("Pick Warder, Prisoner or Either.")
+        player = self.players[player_id]
+        player.side = side
+        if side == "any":
+            return f"{player.nickname} is happy to play either side next match."
+        return f"{player.nickname} wants to play {SIDE_NAMES[side]} next match."
+
+    def swap_sides(self) -> bool:
+        """Server button: ask for the opposite roles next match (sets both picks)."""
+
+        roles = self._roles()
+        if "warder" not in roles or "prisoner" not in roles:
+            return False
+        roles["warder"].side, roles["prisoner"].side = "prisoner", "warder"
+        return True
+
+    def _choose_warder(self, fallback_id: str | None) -> tuple[str, str]:
+        """Warder for the next match, and a line telling both players why.
+
+        Picks that fit together (Warder+Prisoner, Warder+Either, Prisoner+Either)
+        decide the roles. Otherwise the usual rule applies: ``fallback_id`` (the
+        last winner, on a rematch) or a random player.
+        """
+
+        first, second = self.players.values()
+        if first.side != second.side:       # any two different picks fit together
+            if "warder" in (first.side, second.side):
+                warder = first if first.side == "warder" else second
+            else:                           # Prisoner + Either
+                warder = second if first.side == "prisoner" else first
+            return warder.player_id, f"Sides as picked: {warder.nickname} is the warder."
+
+        if fallback_id in self.players:
+            rule = "last match's winner plays warder"
+            warder_id = fallback_id
+        else:
+            rule = "roles were picked at random"
+            warder_id = self.random.choice(list(self.players))
+        if first.side == "any":
+            return warder_id, f"Neither of you picked a side, so {rule}."
+        return warder_id, f"You both picked {SIDE_NAMES[first.side]}, so {rule}."
+
     def start_match(self, forced_warder_id: str | None = None) -> bool:
+        """Deal a new match. ``forced_warder_id`` is the fallback warder (rematch)."""
+
         if len(self.players) != 2:
             self._set_waiting()
             return False
 
         self.size = BOARD_SIZES[self.mode]
         player_ids = list(self.players)
-        if forced_warder_id not in player_ids:
-            forced_warder_id = self.random.choice(player_ids)
+        forced_warder_id, self.role_note = self._choose_warder(forced_warder_id)
         prisoner_id = next(pid for pid in player_ids if pid != forced_warder_id)
         warder, prisoner = self.players[forced_warder_id], self.players[prisoner_id]
         warder.role, prisoner.role = "warder", "prisoner"
@@ -477,7 +532,7 @@ class EscapeGame:
         if len(self.rematch_votes) == len(self.players) == 2:
             previous_winner = self.winner_id
             self.start_match(forced_warder_id=previous_winner)
-            return True, "Both players agreed. A new match has started."
+            return True, "Both players agreed. A new match has started. " + self.role_note
 
         player = self.players[player_id]
         return True, f"{player.nickname} agreed to rematch. Waiting for the other player."
@@ -559,6 +614,7 @@ class EscapeGame:
                     "row": row,
                     "col": col,
                     "score": player.score,
+                    "side": player.side,
                 }
             )
 
@@ -589,6 +645,7 @@ class EscapeGame:
             "winner_id": self.winner_id,
             "winner_name": winner_name,
             "finish_reason": self.finish_reason,
+            "role_note": self.role_note,
             "last_move": last_move,
             "rematch_votes": len(self.rematch_votes),
             "rematch_voters": sorted(self.rematch_votes),
@@ -759,6 +816,7 @@ class EscapeGame:
         self.rematch_votes.clear()
         self.last_move = None
         self.finish_reason = None
+        self.role_note = None
         self._reset_night_state()
         for player in self.players.values():
             player.role = None

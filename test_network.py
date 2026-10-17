@@ -101,6 +101,38 @@ class NetworkTests(unittest.TestCase):
         self.assertIsNone(warder_view["night"]["key"])
         self.assertIsNotNone(prisoner_view["night"]["key"])
 
+    def test_players_pick_sides_over_tls(self):
+        alice, bob = Player(self.port), Player(self.port)
+        alice.wait_for("hello"); bob.wait_for("hello")
+        alice.channel.send({"type": "join", "nickname": "Alice", "side": "prisoner"})
+        alice.wait_for("welcome")
+        bob.channel.send({"type": "join", "nickname": "Bob"})
+        message = bob.wait_for("state", lambda m: m["state"]["status"] == "playing")
+        players = {p["nickname"]: p for p in message["state"]["players"]}
+        self.assertEqual(players["Alice"]["role"], "prisoner")
+        self.assertEqual(players["Alice"]["side"], "prisoner")
+        self.assertEqual(players["Bob"]["side"], "any")
+        self.assertIn("Sides as picked", message["message"])
+
+        for bad in ("boss", ["warder"], None):
+            bob.channel.send({"type": "side", "side": bad})
+            self.assertIn("Pick Warder, Prisoner or Either", bob.wait_for("error")["message"])
+
+        bob.channel.send({"type": "side", "side": "prisoner"})
+        update = alice.wait_for("state", lambda m: any(
+            p["nickname"] == "Bob" and p["side"] == "prisoner" for p in m["state"]["players"]))
+        players = {p["nickname"]: p for p in update["state"]["players"]}
+        self.assertEqual(players["Alice"]["role"], "prisoner")     # roles hold until the next match
+        self.assertIn("Bob wants to play Prisoner", update["message"])
+
+    def test_join_with_an_unknown_side_is_refused(self):
+        eve = Player(self.port)
+        eve.wait_for("hello")
+        eve.channel.send({"type": "join", "nickname": "Eve", "side": "king"})
+        self.assertIn("Pick Warder", eve.wait_for("error")["message"])
+        eve.channel.send({"type": "join", "nickname": "Eve", "side": "warder"})
+        self.assertEqual(eve.wait_for("welcome")["nickname"], "Eve")
+
     def test_plain_tcp_is_refused(self):
         with socket.create_connection(("127.0.0.1", self.port), timeout=5) as raw:
             raw.sendall(b'{"type":"join","nickname":"Mallory"}\n')

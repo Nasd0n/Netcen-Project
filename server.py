@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 import security
 from config import SERVER_PORT, WEB_PORT
-from game import DIAGONALS, MODE_NAMES, MODES, EscapeGame
+from game import DIAGONALS, MODE_NAMES, MODES, SIDE_NAMES, SIDES, EscapeGame
 from protocol import IDLE_LIMIT, Channel
 from tunnel import Tunnel
 from web import WebHost, WebSocketChannel
@@ -203,7 +203,7 @@ class GameServer:
             if kind != "join":
                 session.send({"type": "error", "message": "Please choose a nickname first."})
                 return
-            self._join(session, message.get("nickname", ""))
+            self._join(session, message.get("nickname", ""), message.get("side", "any"))
             return
 
         if kind == "move":
@@ -237,6 +237,16 @@ class GameServer:
                 self.broadcast(text)
             else:
                 session.send({"type": "error", "message": text})
+        elif kind == "side":
+            side = message.get("side")
+            if not isinstance(side, str) or side not in SIDES:
+                session.send({"type": "error", "message": "Pick Warder, Prisoner or Either."})
+                return
+            with self.lock:
+                changed = self.game.players[session.player_id].side != side
+                text = self.game.set_side(session.player_id, side)
+            if changed:
+                self.broadcast(text)
         elif kind == "rematch":
             with self.lock:
                 accepted, text = self.game.request_rematch(session.player_id)
@@ -247,12 +257,16 @@ class GameServer:
         else:
             session.send({"type": "error", "message": "Unknown request."})
 
-    def _join(self, session: ClientSession, nickname: object) -> None:
+    def _join(self, session: ClientSession, nickname: object, side: object = "any") -> None:
+        if not isinstance(side, str) or side not in SIDES:
+            session.send({"type": "error", "message": "Pick Warder, Prisoner or Either."})
+            return
         try:
             with self.lock:
-                self.game.add_player(session.player_id, str(nickname)[:64])
+                self.game.add_player(session.player_id, str(nickname)[:64], side)
                 session.nickname = self.game.players[session.player_id].nickname
                 started = len(self.game.players) == 2 and self.game.start_match()
+                note = self.game.role_note
         except ValueError as error:
             session.send({"type": "error", "message": str(error)})
             return
@@ -260,7 +274,7 @@ class GameServer:
         self.log("%s joined the game." % session.nickname)
         session.send({"type": "welcome", "nickname": session.nickname})
         if started:
-            self.broadcast("Both players are here. Match on! The warder moves first.")
+            self.broadcast("Both players are here. Match on! The warder moves first. " + note)
         else:
             self.broadcast("%s is waiting for an opponent." % session.nickname)
 
@@ -345,17 +359,29 @@ class GameServer:
             if mode == self.game.mode:
                 return
             started = self.game.set_mode(mode)
+            note = self.game.role_note
         self.log("Switched to %s mode." % MODE_NAMES[mode])
         if started:
-            self.broadcast("The server switched to %s. New match - scores kept!" % MODE_NAMES[mode])
+            self.broadcast("The server switched to %s. New match - scores kept! %s"
+                           % (MODE_NAMES[mode], note))
         else:
             self.broadcast("The next match will be played in %s mode." % MODE_NAMES[mode])
 
     def reset_game(self) -> None:
         with self.lock:
             self.game.reset_game()
+            note = self.game.role_note if self.game.status == "playing" else None
         self.log("Scores reset and a fresh match started.")
-        self.broadcast("The server reset the game. Scores are back to 0-0.")
+        self.broadcast("The server reset the game. Scores are back to 0-0." + (" " + note if note else ""))
+
+    def swap_sides(self) -> None:
+        with self.lock:
+            swapped = self.game.swap_sides()
+        if swapped:
+            self.log("Sides will swap next match.")
+            self.broadcast("The server asked for swapped sides next match.")
+        else:
+            self.log("Nothing to swap yet: sides are dealt when a match starts.")
 
     def log(self, text: str) -> None:
         self.on_event("log", text)
@@ -524,8 +550,10 @@ class ServerDashboard:
                  font=Fonts.get(13, "bold")).pack(anchor="w", padx=16, pady=(14, 2))
         tk.Label(reset_card, text="New map, new roles,\nboth scores back to 0.", bg=CARD,
                  fg=SOFT, font=Fonts.get(11), justify="left").pack(anchor="w", padx=16)
+        PillButton(reset_card, "Swap sides next match", command=self.server.swap_sides,
+                   color=INK, width=220, height=36, font_size=11).pack(padx=16, pady=(10, 0))
         PillButton(reset_card, "Reset game & scores", command=self.confirm_reset,
-                   color=BAD, width=220, height=40).pack(padx=16, pady=(10, 14))
+                   color=BAD, width=220, height=40).pack(padx=16, pady=(8, 14))
 
     # ----- events from network threads ------------------------------------
 
@@ -571,6 +599,8 @@ class ServerDashboard:
                      font=Fonts.get(12, "bold")).pack(side="left", padx=(6, 8))
             extra = "choosing a name..." if not client.get("joined") else (
                 (player or {}).get("role") or "waiting")
+            if player and player.get("side", "any") != "any":
+                extra += "  ·  wants %s" % SIDE_NAMES[player["side"]]
             tk.Label(row, text=extra, bg=CARD, fg=SOFT, font=Fonts.get(11)).pack(side="left")
             tk.Label(row, text="%s  ·  %s" % (client.get("address", ""), client.get("tls", "")),
                      bg=CARD, fg=FAINT, font=Fonts.get(10)).pack(side="right")
