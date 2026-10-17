@@ -94,8 +94,13 @@ def classic_outcomes(size: int, walls: set[Cell], tunnel: Cell,
     return result
 
 
-def prisoner_forced_wins(size: int, walls: set[Cell], tunnel: Cell, key: Cell | None) -> set[tuple]:
-    """All (warder, prisoner, has_key) positions, warder to move, that the prisoner wins by force."""
+def prisoner_forced_wins(size: int, walls: set[Cell], tunnel: Cell, key: Cell | None,
+                         allow_wait: bool = True) -> set[tuple]:
+    """All (warder, prisoner, has_key) positions, warder to move, that the prisoner wins by force.
+
+    With ``allow_wait`` either side may also stay put. A prisoner with no
+    legal step (and no wait) counts as caught.
+    """
 
     free = [(r, c) for r in range(size) for c in range(size) if (r, c) not in walls]
     open_ = set(free)
@@ -105,71 +110,61 @@ def prisoner_forced_wins(size: int, walls: set[Cell], tunnel: Cell, key: Cell | 
     def warder_moves(w, p):
         return [x for x in nb[w] if x != tunnel and x != p]
 
-    def prisoner_moves(w, p, k):
-        return [x for x in nb[p] if x != w and (x != tunnel or k)]
-
     def threat(w, p):
         return ring(w, p) <= 1 or any(ring(s, p) <= 1 for s in warder_moves(w, p))
 
     result: dict[tuple, str] = {}
     left: dict[tuple, int] = {}
+    before: dict[tuple, list[tuple]] = defaultdict(list)
     queue: deque = deque()
     states = [(w, p, k) for w in free for p in free for k in keys
               if w != p and w != tunnel and p != tunnel
               and not (key is not None and p == key and k == 0)]  # standing on the key = holding it
 
+    def options_for(state, options):
+        left[state] = len(options)
+        for option in options:
+            before[option].append(state)
+
     for w, p, k in states:
-        moves = prisoner_moves(w, p, k)
-        left[(w, p, "W", k)] = len(warder_moves(w, p))
-        left[(w, p, "P", k)] = len([x for x in moves if x != tunnel])
-        if threat(w, p):
-            result[(w, p, "W", k)] = "W"
-            queue.append((w, p, "W", k))
-        if k and tunnel in moves:
-            result[(w, p, "P", k)] = "P"
-            queue.append((w, p, "P", k))
-    for w, p, k in states:
-        state = (w, p, "P", k)
-        if left[state] == 0 and state not in result:
+        state = (w, p, "W", k)
+        if threat(w, p):                                # grab now, or step and grab
             result[state] = "W"
             queue.append(state)
+        else:
+            options = [(x, p, "P", k) for x in warder_moves(w, p)]
+            if allow_wait:
+                options.append((w, p, "P", k))
+            options_for(state, options)
+
+        state = (w, p, "P", k)
+        steps = [x for x in nb[p] if x != w and (x != tunnel or k)]
+        if tunnel in steps:                             # unlocked tunnel next door: escaped
+            result[state] = "P"
+            queue.append(state)
+            continue
+        options = [(w, x, "W", 1 if x == key else k) for x in steps]
+        if allow_wait:
+            options.append((w, p, "W", k))
+        if not options:                                 # boxed in: caught next turn
+            result[state] = "W"
+            queue.append(state)
+        else:
+            options_for(state, options)
 
     while queue:
-        w, p, turn, k = queue.popleft()
-        winner = result[(w, p, turn, k)]
-        if turn == "P":
-            # The warder just moved from w0 to w.
-            for w0 in nb[w]:
-                if w0 == tunnel or w0 == p:
-                    continue
-                state = (w0, p, "W", k)
-                if state in result or state not in left:
-                    continue
-                if winner == "W":
-                    result[state] = "W"
-                    queue.append(state)
-                else:
-                    left[state] -= 1
-                    if left[state] == 0 and not threat(w0, p):
-                        result[state] = "P"
-                        queue.append(state)
-        else:
-            # The prisoner just moved from p0 to p (picking up the key if p is the key).
-            before = (0, 1) if (key is not None and p == key and k == 1) else (k,)
-            for p0 in nb[p]:
-                if p0 == w or p0 == tunnel:
-                    continue
-                for k0 in before:
-                    state = (w, p0, "P", k0)
-                    if state in result or state not in left:
-                        continue
-                    if winner == "P":
-                        result[state] = "P"
-                        queue.append(state)
-                    else:
-                        left[state] -= 1
-                        if left[state] == 0:
-                            result[state] = "W"
-                            queue.append(state)
+        state = queue.popleft()
+        winner = result[state]
+        for previous in before[state]:
+            if previous in result:
+                continue
+            if previous[2] == winner:
+                result[previous] = winner
+                queue.append(previous)
+            else:
+                left[previous] -= 1
+                if left[previous] == 0:
+                    result[previous] = winner
+                    queue.append(previous)
 
     return {(w, p, k) for (w, p, t, k), who in result.items() if t == "W" and who == "P"}

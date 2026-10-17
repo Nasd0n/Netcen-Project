@@ -162,7 +162,7 @@ class NetworkTests(unittest.TestCase):
                 for player in roles.values():
                     player.boxes, player.items = {}, []
                 roles["warder"].position, roles["prisoner"].position = (1, 1), (7, 7)
-                game.trail, game.lunge = [((7, 7), False)], False
+                game.trail, game.lunge, game.rounds = [((7, 7), False)], False, 5
                 game.turn_player_id = roles["warder"].player_id
                 game.turn_deadline = time.monotonic() + 10
             warder.channel.send({"type": "move", "direction": action})
@@ -174,6 +174,34 @@ class NetworkTests(unittest.TestCase):
             self.assertNotIn("[1, 2]", json.dumps(message))
         self.assertIn("moved in the dark", received["stay"]["message"])
         self.assertEqual(received["right"], received["stay"])
+
+    def test_start_hint_never_carries_the_warders_square(self):
+        warder, prisoner = self.night_match()
+        game = self.server.game
+        with self.server.lock:
+            game.obstacles, game.tunnel, game.key = {(0, 9), (9, 0)}, (9, 9), (0, 5)
+            roles = {p.role: p for p in game.players.values()}
+            for player in roles.values():
+                player.boxes, player.items = {}, []
+            roles["warder"].position, roles["prisoner"].position = (1, 1), (7, 7)
+            game.trail, game.rounds, game.start_hint = [((7, 7), False)], 0, None
+            game.turn_player_id = roles["warder"].player_id
+            game.turn_deadline = time.monotonic() + 10
+        warder.channel.send({"type": "move", "direction": "right"})        # now at (1, 2)
+        message = prisoner.wait_for("state", lambda m: (m["state"].get("night") or {}).get("start_hint"))
+        view = message["state"]
+        hint = view["night"]["start_hint"]
+        self.assertEqual(set(hint), {"top", "left", "size", "fresh"})
+        self.assertTrue(hint["top"] <= 1 < hint["top"] + 3 and hint["left"] <= 2 < hint["left"] + 3)
+        hidden = next(p for p in view["players"] if p["role"] == "warder")
+        self.assertIsNone(hidden["row"])
+        self.assertNotIn("W", "".join(view["board"]))
+        self.assertIsNone(view["night"]["lantern"])
+        self.assertIsNone(view["last_move"])
+        self.assertNotIn("[1, 2]", json.dumps(message))
+        # The warder's own messages never include the block.
+        mine = warder.wait_for("state", lambda m: m.get("message", "").startswith(roles["warder"].nickname))
+        self.assertIsNone(mine["state"]["night"]["start_hint"])
 
     def test_scout_answers_over_the_network(self):
         warder, prisoner = self.night_match()

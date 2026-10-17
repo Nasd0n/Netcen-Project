@@ -4,10 +4,10 @@ import json
 import time
 import unittest
 
-from ai import suggest_direction
+from ai import suggest_direction, suggest_move
 from game import (
-    BARRICADE_ROUNDS, FOOTPRINT_AGE, LOCKDOWN_ROUNDS, SMOKE_TURNS, EscapeGame, manhattan,
-    ring_distance,
+    BARRICADE_ROUNDS, FOOTPRINT_AGE, LOCKDOWN_ROUNDS, SMOKE_TURNS, START_HINT_SIZE, START_HINT_TURNS,
+    EscapeGame, manhattan, ring_distance,
 )
 from solver import prisoner_forced_wins
 
@@ -403,6 +403,7 @@ class NightTests(unittest.TestCase):
                 player.boxes, player.items = {}, []
             game.players["w"].position, game.players["p"].position = (1, 1), (7, 7)
             game.trail, game.turn_player_id = [((7, 7), False)], "w"
+            game.rounds = 5                          # mid-match: the start hint is over
             game.turn_deadline = time.monotonic() + 10
             accepted, message = game.move("w", action)
             self.assertTrue(accepted)
@@ -425,6 +426,74 @@ class NightTests(unittest.TestCase):
         self.place((8, 9), (2, 2))                   # already guarding, prisoner out of sight
         self.game.trail = [((2, 2), True)]
         self.assertEqual(suggest_direction(self.game.snapshot("w"), "w"), "stay")
+
+    # ----- start hint -----------------------------------------------------
+
+    def opening(self, seed):
+        """A fresh night match after the warder's first move."""
+
+        game = EscapeGame(seed=seed, mode="night")
+        game.add_player("w", "Wendy"); game.add_player("p", "Pat")
+        game.start_match(forced_warder_id="w")
+        self.assertIsNone(game.snapshot("p")["night"]["start_hint"])   # nothing before that move
+        for step in ("up", "down", "left", "right", "stay"):
+            if game.move("w", step)[0]:
+                break
+        self.assertEqual(game.turn_player_id, "p")
+        return game
+
+    def test_prisoner_gets_a_3x3_block_holding_the_warder(self):
+        for seed in range(10):
+            game = self.opening(seed)
+            hint = game.snapshot("p")["night"]["start_hint"]
+            row, col = game.players["w"].position
+            self.assertEqual(hint["size"], START_HINT_SIZE)
+            self.assertTrue(hint["fresh"])
+            self.assertTrue(hint["top"] <= row < hint["top"] + 3 and hint["left"] <= col < hint["left"] + 3)
+            self.assertTrue(0 <= hint["top"] <= game.size - 3 and 0 <= hint["left"] <= game.size - 3)
+
+    def test_the_warder_never_gets_the_hint(self):
+        game = self.opening(4)
+        self.assertIsNone(game.snapshot("w")["night"]["start_hint"])
+
+    def test_the_hint_is_chosen_once(self):
+        game = self.opening(6)
+        first = game.snapshot("p")["night"]["start_hint"]
+        for _ in range(20):
+            self.assertEqual(game.snapshot("p")["night"]["start_hint"], first)
+        game.move("p", "stay")                        # prisoner's first turn ends
+        for step in ("up", "down", "left", "right", "stay"):
+            if game.move("w", step)[0]:               # the warder moves on...
+                break
+        faded = game.snapshot("p")["night"]["start_hint"]
+        self.assertEqual((faded["top"], faded["left"]), (first["top"], first["left"]))   # ...same block
+        self.assertFalse(faded["fresh"])
+
+    def test_the_hint_disappears_after_its_turns(self):
+        game = self.opening(7)
+        for _ in range(START_HINT_TURNS):
+            self.assertIsNotNone(game.snapshot("p")["night"]["start_hint"])
+            game.move("p", "stay")
+            game.turn_player_id = "p"                 # skip the warder's turn
+        self.assertIsNone(game.snapshot("p")["night"]["start_hint"])
+
+    def test_the_warder_is_not_always_in_the_middle(self):
+        offsets = set()
+        for seed in range(40):
+            game = self.opening(seed)
+            hint = game.snapshot("p")["night"]["start_hint"]
+            row, col = game.players["w"].position
+            offsets.add((row - hint["top"], col - hint["left"]))
+        self.assertGreater(len(offsets), 4)
+
+    def test_scout_steers_around_the_hint(self):
+        self.place((4, 5), (7, 5), turn="p")          # key at (0, 5), warder 3 away: out of sight
+        self.game.start_hint, self.game.rounds = (3, 4), 0   # block: rows 3-5, columns 4-6
+        state = self.game.snapshot("p")
+        self.assertIsNone(next(p for p in state["players"] if p["role"] == "warder")["row"])
+        direction = suggest_direction(state, "p")
+        self.assertIn(direction, {"left", "right"})   # not straight up toward the block
+        self.assertIn("around the warder's area", suggest_move(state, "p"))
 
     # ----- dealing --------------------------------------------------------
 

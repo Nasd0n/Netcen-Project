@@ -321,8 +321,6 @@ class EscapeClient:
         self.lockdown_label = tk.Label(words, text="", bg=CARD, fg=BAD, font=Fonts.get(11, "bold"),
                                        anchor="w")
         self.lockdown_label.pack(fill="x")
-        self.wait_button = PillButton(words, "Wait  (Space)", command=lambda: self.move(WAIT),
-                                      color=INK, width=150, height=30, font_size=10)
 
         # Scout AI
         scout = card(right, fill="x", pady=(12, 0))
@@ -332,9 +330,14 @@ class EscapeClient:
             scout, text="Plans a shortest route for you. It only suggests.",
             bg=CARD, fg=SOFT, font=Fonts.get(11), wraplength=290, justify="left")
         self.scout_text.pack(anchor="w", padx=16, pady=(2, 8))
-        self.scout_button = PillButton(scout, "Ask Scout", command=self.ask_scout,
-                                       color=WARDER, width=290, height=38, font_size=12)
-        self.scout_button.pack(padx=16, pady=(0, 14))
+        actions = tk.Frame(scout, bg=CARD)
+        actions.pack(fill="x", padx=16, pady=(0, 14))
+        self.scout_button = PillButton(actions, "Ask Scout", command=self.ask_scout,
+                                       color=WARDER, width=190, height=38, font_size=12)
+        self.scout_button.pack(side="left", fill="x", expand=True)
+        # Waiting sits beside Scout so the right-hand column doesn't get taller.
+        self.wait_button = PillButton(actions, "Wait", command=lambda: self.move(WAIT),
+                                      color=INK, width=90, height=38, font_size=12)
 
         # Night Escape item (shown only in that mode)
         self.item_card = card(right)
@@ -500,6 +503,8 @@ class EscapeClient:
                     self.turn_hint.configure(text="The prisoner is in your light! Click the target to grab.")
                 elif state.get("night") and role == "warder" and state["night"].get("smoke_turns"):
                     self.turn_hint.configure(text="They threw smoke. You can't see them unless they're right beside you.")
+                elif state.get("night") and (state["night"].get("start_hint") or {}).get("fresh"):
+                    self.turn_hint.configure(text="The warder is somewhere in the red block. Plan your route around it.")
                 else:
                     self.turn_hint.configure(text="Click a highlighted square, or use the arrow keys / WASD."
                                              + (" Space waits." if state.get("allow_wait") else ""))
@@ -600,7 +605,7 @@ class EscapeClient:
         self.scout_button.configure_button(enabled=self._my_turn())
         can_wait = bool(state.get("allow_wait")) and state.get("status") == "playing"
         if can_wait and not self.wait_button.winfo_manager():
-            self.wait_button.pack(anchor="w", pady=(6, 0))
+            self.wait_button.pack(side="right", padx=(8, 0))
         elif not can_wait and self.wait_button.winfo_manager():
             self.wait_button.pack_forget()
         lunge = ((state.get("night") or {}).get("lunge"))
@@ -724,6 +729,11 @@ class EscapeClient:
         barricades = {(r, c) for r, c, _ in night.get("barricades", [])}
         key = tuple(night["key"]) if night.get("key") else None
         prints = {(r, c): age for r, c, age in night.get("footprints", [])}
+        start_hint = night.get("start_hint") if i_am_prisoner else None
+        hint_area = set()
+        if start_hint:
+            span = range(start_hint["size"])
+            hint_area = {(start_hint["top"] + dr, start_hint["left"] + dc) for dr in span for dc in span}
         vision = night.get("prisoner_vision", 2)
         radius = 12 if size <= 6 else 6
         small = size > 6
@@ -742,6 +752,8 @@ class EscapeClient:
                     seen = i_am_prisoner and mine is not None and ring(mine, (r, c)) <= vision
                     fill = LANTERN if lit else ("#3a4468" if seen else
                                                 (NIGHT_YARD if (r + c) % 2 == 0 else NIGHT_YARD_ALT))
+                    if (r, c) in hint_area and not lit and start_hint["fresh"]:
+                        fill = "#4f3550"            # where the warder might be
                     if (r, c) in targets and (r, c) == self.hover_cell:
                         fill = LANTERN_HOVER
                     if (r, c) in placeable and (r, c) == self.hover_cell:
@@ -810,8 +822,28 @@ class EscapeClient:
                     rounded_rect(canvas, x1 + 2, y1 + 2, x2 - 2, y2 - 2, radius=max(3, radius - 2),
                                  fill="", outline=WARDER, width=3, dash=(6, 4))
 
+        if start_hint:
+            self._draw_start_hint(start_hint, size)
         if state.get("status") == "finished":
             self._draw_result(state)
+
+    def _draw_start_hint(self, hint: dict, size: int) -> None:
+        """Night, prisoner: the 3x3 block the warder is somewhere in."""
+
+        canvas = self.board
+        last = hint["size"] - 1
+        x1, y1, _, _ = self._cell_box(hint["top"], hint["left"], size)
+        _, _, x2, y2 = self._cell_box(hint["top"] + last, hint["left"] + last, size)
+        fresh = hint["fresh"]
+        rounded_rect(canvas, x1 - 1, y1 - 1, x2 + 1, y2 + 1, radius=8, fill="", outline=ZONE,
+                     width=3 if fresh else 2, dash=() if fresh else (5, 4))
+        text = "Warder is somewhere here" if fresh else "Last known area"
+        label = canvas.create_text((x1 + x2) / 2, y1 + 9, text=text, fill="#ffd2c8",
+                                   font=Fonts.get(8, "bold"))
+        box = canvas.bbox(label)
+        backing = canvas.create_rectangle(box[0] - 4, box[1] - 1, box[2] + 4, box[3] + 1,
+                                          fill="#3b2433", outline="")
+        canvas.tag_lower(backing, label)
 
     def _draw_result(self, state: dict) -> None:
         canvas = self.board

@@ -4,7 +4,7 @@ import time
 import unittest
 
 from game import EscapeGame
-from solver import classic_outcomes
+from solver import classic_outcomes, prisoner_forced_wins
 
 # A 5x5 yard where only the top row is open: a corridor from (0, 0) to (0, 4).
 CORRIDOR_WALLS = {(r, c) for r in range(1, 5) for c in range(5)}
@@ -48,6 +48,20 @@ class ClassicSolverTests(unittest.TestCase):
                     without_wait += warder_wins
         # Without waiting, the distance parity often traps a prisoner who has to move.
         self.assertLess(with_wait, without_wait)
+
+    def test_night_solver_lets_both_sides_wait(self):
+        removed = 0
+        for seed in range(12):
+            game = EscapeGame(seed=seed, mode="night")
+            game.add_player("w", "W"); game.add_player("p", "P")
+            game.start_match(forced_warder_id="w")
+            args = (game.size, game.obstacles, game.tunnel, game.key)
+            with_wait = prisoner_forced_wins(*args, allow_wait=True)
+            without_wait = prisoner_forced_wins(*args, allow_wait=False)
+            self.assertLessEqual(with_wait, without_wait)
+            removed += len(without_wait - with_wait)
+        # A warder who may wait can guard, so on some maps escapes stop being forced.
+        self.assertGreater(removed, 0)
 
     def test_fast_enough_for_every_deal(self):
         game = EscapeGame(seed=1)

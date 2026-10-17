@@ -2,7 +2,8 @@
 
 Both sides are played by Scout (ai.py), each looking only at its own view
 from EscapeGame.snapshot(), with some random moves mixed in so the bots make
-human-like mistakes. The real game engine runs every move, so dealing,
+human-like mistakes. In Night Escape they also use items in a simple way
+(see use_items). The real game engine runs every move, so dealing,
 darkness, footprints, items on the map and the lockdown all apply.
 
     python tools/balance.py                      # both modes, 1000 games each
@@ -44,7 +45,25 @@ def random_action(game: EscapeGame, pid: str, rng: random.Random) -> bool:
     return False
 
 
-def play(seed: int, mode: str, noise: float, max_moves: int) -> tuple[str, str, int]:
+def use_items(game: EscapeGame, pid: str) -> None:
+    """Simple Night item habits: run when the warder is in sight, light up when lost."""
+
+    view = game.snapshot(pid)
+    night = view.get("night") or {}
+    me = next(p for p in view["players"] if p["id"] == pid)
+    other = next(p for p in view["players"] if p["id"] != pid)
+    items = night.get("my_items", [])
+    if me["role"] == "prisoner" and other["row"] is not None:
+        if "smoke" in items and not night.get("smoke_turns"):
+            game.use_item(pid, "smoke")
+        elif "sprint" in items and not night.get("sprint_steps"):
+            game.use_item(pid, "sprint")
+    elif me["role"] == "warder" and other["row"] is None and not night.get("footprints") \
+            and "searchlight" in items and not night.get("searchlight"):
+        game.use_item(pid, "searchlight")
+
+
+def play(seed: int, mode: str, noise: float, max_moves: int, items: bool = True) -> tuple[str, str, int]:
     """One bot game. Returns (winner role or "none", finish reason, moves)."""
 
     rng = random.Random(seed * 7919 + 17)
@@ -56,6 +75,8 @@ def play(seed: int, mode: str, noise: float, max_moves: int) -> tuple[str, str, 
     while game.status == "playing" and moves < max_moves:
         pid = game.turn_player_id
         game.turn_deadline = time.monotonic() + 60      # bots never time out
+        if items and game.night:
+            use_items(game, pid)
         done = False
         if rng.random() >= noise:
             direction = suggest_direction(game.snapshot(pid), pid)
@@ -73,11 +94,12 @@ def play(seed: int, mode: str, noise: float, max_moves: int) -> tuple[str, str, 
     return game.players[game.winner_id].role, game.finish_reason, moves
 
 
-def report(mode: str, games: int, noise: float, max_moves: int, first_seed: int) -> dict:
+def report(mode: str, games: int, noise: float, max_moves: int, first_seed: int,
+           items: bool = True) -> dict:
     results, reasons, lengths = Counter(), Counter(), []
     started = time.perf_counter()
     for seed in range(first_seed, first_seed + games):
-        winner, reason, moves = play(seed, mode, noise, max_moves)
+        winner, reason, moves = play(seed, mode, noise, max_moves, items)
         results[winner] += 1
         reasons[reason] += 1
         if winner != "none":
@@ -103,13 +125,15 @@ def main() -> None:
                         help="moves (both players) before giving up; default 150 Classic, 400 Night")
     parser.add_argument("--seed", type=int, default=0, help="first game seed")
     parser.add_argument("--no-wait", action="store_true", help="play with ALLOW_WAIT = False")
+    parser.add_argument("--no-items", action="store_true", help="Night bots never use their items")
     args = parser.parse_args()
     if args.no_wait:
         game_module.ALLOW_WAIT = False
-    print("ALLOW_WAIT = %s, noise %.0f%%" % (getattr(game_module, "ALLOW_WAIT", False), 100 * args.noise))
+    print("ALLOW_WAIT = %s, noise %.0f%%, items %s" % (
+        getattr(game_module, "ALLOW_WAIT", False), 100 * args.noise, "off" if args.no_items else "on"))
     for mode in (("classic", "night") if args.mode == "both" else (args.mode,)):
         limit = args.max_moves or (150 if mode == "classic" else 400)
-        report(mode, args.games, args.noise, limit, args.seed)
+        report(mode, args.games, args.noise, limit, args.seed, not args.no_items)
 
 
 if __name__ == "__main__":

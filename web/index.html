@@ -72,7 +72,7 @@
 
   .board-wrap { position: relative; }
   #board {
-    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); grid-template-rows: repeat(5, minmax(0, 1fr)); gap: 7px; padding: 7px;
+    position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); grid-template-rows: repeat(5, minmax(0, 1fr)); gap: 7px; padding: 7px;
     background: var(--yard-dark); border-radius: 22px; aspect-ratio: 1; touch-action: manipulation;
   }
   .cell {
@@ -155,6 +155,18 @@
   .big .cell { border-radius: 6px; }
   .big .cell::after, .big .cell .note { font-size: 8px !important; }
   .big .cell.zone::before { inset: 2px; border-radius: 5px; }
+  /* Night start hint: the warder is somewhere in this 3x3 block (placed on the grid area). */
+  .hintarea {
+    position: absolute; inset: 0; pointer-events: none; border-radius: 10px;
+    border: 3px solid rgba(236, 104, 80, .95); background: rgba(236, 104, 80, .2);
+    display: flex; justify-content: center; align-items: flex-start;
+  }
+  .hintarea.faded { border: 2px dashed rgba(236, 104, 80, .8); background: transparent; }
+  .hintarea span {
+    margin: 3px 3px 0; padding: 1px 6px; border-radius: 6px; background: #3b2433; color: #ffd2c8;
+    font-size: 11px; font-weight: 800; text-align: center; line-height: 1.15; max-width: calc(100% - 6px);
+  }
+  @media (max-width: 600px) { .hintarea span { font-size: 9px; padding: 1px 4px; } }
   .night .cell.seen { background: #3a4468; }
   .night .cell.seen:nth-child(odd) { background: #3d476c; }
   .cell.lockon { box-shadow: inset 0 0 0 3px var(--bad); cursor: crosshair; animation: lock 0.9s ease-in-out infinite; }
@@ -508,6 +520,7 @@ function renderTurn() {
          : night && n0?.lunge ? "You spotted them! Click the target to grab before time runs out."
          : night && role === "warder" && lockOn() ? "The prisoner is in your light! Click the target to grab."
          : night && n0?.smoke_turns && role === "warder" ? "They threw smoke. You can't see them unless they're right beside you."
+         : night && n0?.start_hint?.fresh ? "The warder is somewhere in the red block. Plan your route around it."
          : "Tap a highlighted square." + (state.allow_wait ? " Space waits." : ""))
       : "They have 10 seconds. Plan your next step.";
   }
@@ -718,6 +731,18 @@ function renderBoard() {
     cell.setAttribute("aria-label", `Row ${r + 1}, column ${c + 1}: ${label}`);
     grid.append(cell);
   }));
+
+  const sh = iAmPrisoner && n?.start_hint;
+  if (sh) {
+    const area = document.createElement("div");
+    area.className = "hintarea" + (sh.fresh ? "" : " faded");
+    area.style.gridRow = `${sh.top + 1} / span ${sh.size}`;
+    area.style.gridColumn = `${sh.left + 1} / span ${sh.size}`;
+    const label = document.createElement("span");
+    label.textContent = sh.fresh ? "Warder is somewhere here" : "Last known area";
+    area.append(label);
+    grid.append(area);
+  }
 
   const done = state.status === "finished";
   $("overlay").classList.toggle("hidden", !done);

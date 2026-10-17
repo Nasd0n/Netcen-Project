@@ -61,6 +61,8 @@ MAX_ITEMS = 2
 LOCKDOWN_ROUNDS = 60
 NIGHT_START_GAP = 6
 NIGHT_WARDER_TO_TUNNEL = 3   # no camping on the tunnel from the first move
+START_HINT_SIZE = 3          # the prisoner's start hint: a 3x3 block that holds the warder
+START_HINT_TURNS = 2         # shown on the prisoner's first turn, then faded for one more
 ITEMS_FOR_ROLE = {"warder": ("searchlight", "barricade"), "prisoner": ("smoke", "sprint")}
 ITEM_NAMES = {"searchlight": "Searchlight", "barricade": "Barricade",
               "smoke": "Smoke bomb", "sprint": "Sprint"}
@@ -157,6 +159,7 @@ class EscapeGame:
         self.sprint_steps = 0
         self.barricades: dict[Cell, int] = {}       # square -> rounds left
         self.rounds = 0
+        self.start_hint: Cell | None = None         # top-left square of the 3x3 block, chosen once
 
     # ------------------------------------------------------------------
     # Players and matches
@@ -659,8 +662,9 @@ class EscapeGame:
             "prisoner_hidden": hidden_role == "prisoner",
             "warder_hidden": hidden_role == "warder",
             "rounds_left": max(0, LOCKDOWN_ROUNDS - self.rounds),
-            # Only the prisoner knows about the key.
+            # Only the prisoner knows about the key, and gets the start hint.
             "key": list(self.key) if (prisoner_side and self.key) else None,
+            "start_hint": self.start_hint_view() if prisoner_side else None,
             "has_key": self.has_key if prisoner_side else None,
             "my_items": list(viewer.items) if viewer else [],
             # Each player sees only their own boxes, and what is inside them.
@@ -700,7 +704,7 @@ class EscapeGame:
                     continue
                 self.key = self.random.choice(keys)
                 fallback = fallback or (warder, prisoner, self.key, set(self.obstacles), self.tunnel)
-                wins = prisoner_forced_wins(self.size, self.obstacles, self.tunnel, self.key)
+                wins = prisoner_forced_wins(self.size, self.obstacles, self.tunnel, self.key, ALLOW_WAIT)
                 if (warder, prisoner, 0) not in wins:
                     return warder, prisoner
         if fallback is None:  # practically never: take any legal spots
@@ -824,6 +828,29 @@ class EscapeGame:
             pid for pid in player_ids if pid != self.turn_player_id
         )
         self.turn_deadline = time.monotonic() + TURN_SECONDS
+        if self.night and self.start_hint is None and self.rounds == 0 \
+                and self.players[self.turn_player_id].role == "prisoner":
+            self._place_start_hint()
+
+    def _place_start_hint(self) -> None:
+        """Night: a random 3x3 block around the warder, for the prisoner's first turns.
+
+        It is chosen once per match. The warder can be anywhere inside it (the
+        block slides inward at the edges), and picking a fresh block for every
+        snapshot would let the prisoner intersect them to find the exact square.
+        """
+
+        row, col = self._roles()["warder"].position
+        last = self.size - START_HINT_SIZE
+        tops = range(max(0, row - START_HINT_SIZE + 1), min(row, last) + 1)
+        lefts = range(max(0, col - START_HINT_SIZE + 1), min(col, last) + 1)
+        self.start_hint = (self.random.choice(tops), self.random.choice(lefts))
+
+    def start_hint_view(self) -> dict | None:
+        if self.start_hint is None or self.status != "playing" or self.rounds >= START_HINT_TURNS:
+            return None
+        return {"top": self.start_hint[0], "left": self.start_hint[1],
+                "size": START_HINT_SIZE, "fresh": self.rounds == 0}
 
     def _set_waiting(self) -> None:
         self.status = "waiting"

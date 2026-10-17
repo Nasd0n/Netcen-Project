@@ -159,6 +159,19 @@ def suggest_move(state: dict, player_id: str) -> str | None:
             blocked.add(target)                      # the tunnel is locked for now
             if night_info.get("key"):
                 goal, goal_name = tuple(night_info["key"]), "key"
+        if night and goal_name == "tunnel" and abs(goal[0] - start[0]) + abs(goal[1] - start[1]) == 1:
+            return _prisoner_text(start, [start, goal], goal, goal_name)   # out before any grab
+        hint = night_info.get("start_hint") if night else None
+        if opponent_position is None and hint:
+            # The start hint: the warder is somewhere in this block. Go around it,
+            # with a square to spare if the yard allows.
+            area = {(hint["top"] + dr, hint["left"] + dc)
+                    for dr in range(hint["size"]) for dc in range(hint["size"])}
+            wide = {(r + dr, c + dc) for r, c in area for dr in (-1, 0, 1) for dc in (-1, 0, 1)}
+            for avoid in (wide, area):
+                path = _path(board, start, goal, blocked | (avoid - {start}))
+                if path and len(path) >= 2:
+                    return _prisoner_text(start, path, goal, goal_name, " around the warder's area")
         if opponent_position is not None:
             blocked.add(opponent_position)
             if night:
@@ -331,14 +344,15 @@ def _back_off(state, board, start, warder, blocked) -> str:
     return "Move %s: every route is too close to the warder, so back away." % name.upper()
 
 
-def _prisoner_text(start, path, goal, goal_name="tunnel") -> str:
+def _prisoner_text(start, path, goal, goal_name="tunnel", route_note="") -> str:
     direction = _direction_between(start, path[1])
     if path[1] == goal:
         if goal_name == "key":
             return "Move %s to grab the key!" % direction.upper()
         return "Move %s to enter the tunnel and escape." % direction.upper()
-    return "Move %s: shortest safe route to the %s is %d steps." % (
+    return "Move %s: shortest safe route to the %s%s is %d steps." % (
         direction.upper(),
         goal_name,
+        route_note,
         len(path) - 1,
     )
