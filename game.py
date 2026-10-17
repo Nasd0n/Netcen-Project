@@ -61,6 +61,8 @@ MAX_ITEMS = 2
 LOCKDOWN_ROUNDS = 60
 NIGHT_START_GAP = 6
 NIGHT_WARDER_TO_TUNNEL = 3   # no camping on the tunnel from the first move
+KEY_MIN_EXITS = 2            # open squares next to the key (one is a dead end the warder can wait at)
+KEY_LANTERN_CHECK = True     # also: no single lantern spot near the key watches every way out
 START_HINT_SIZE = 3          # the prisoner's start hint: a 3x3 block that holds the warder
 START_HINT_TURNS = 2         # shown on the prisoner's first turn, then faded for one more
 ITEMS_FOR_ROLE = {"warder": ("searchlight", "barricade"), "prisoner": ("smoke", "sprint")}
@@ -681,13 +683,17 @@ class EscapeGame:
     # ------------------------------------------------------------------
 
     def _deal_night(self) -> tuple[Cell, Cell]:
-        """10x10 map, key and starts. The solver rejects deals the prisoner wins by force."""
+        """10x10 map, key and starts. The solver rejects deals the prisoner wins by force.
+
+        The key always has two separate ways out (see _fair_key_spot).
+        """
 
         fallback = None
         for _ in range(30):
             self._generate_map()
             free = self._free_cells()
             distance = self._distances_from(self.tunnel)
+            fair_keys: dict[Cell, bool] = {}      # key spot -> passes _fair_key_spot, on this map
             for _ in range(40):
                 warder, prisoner = self.random.sample(free, 2)
                 if (manhattan(warder, prisoner) < NIGHT_START_GAP
@@ -700,9 +706,18 @@ class EscapeGame:
                         and manhattan(c, prisoner) >= NIGHT_START_GAP - 1
                         and manhattan(c, self.tunnel) >= NIGHT_START_GAP - 1
                         and ring_distance(c, warder) > LANTERN_RANGE]
-                if not keys:
+                # Shuffled and checked lazily: the first spot that passes is a fair
+                # random pick among the spots that pass, without checking them all.
+                self.random.shuffle(keys)
+                self.key = None
+                for key in keys:
+                    if key not in fair_keys:
+                        fair_keys[key] = self._fair_key_spot(key)
+                    if fair_keys[key]:
+                        self.key = key
+                        break
+                if self.key is None:
                     continue
-                self.key = self.random.choice(keys)
                 fallback = fallback or (warder, prisoner, self.key, set(self.obstacles), self.tunnel)
                 wins = prisoner_forced_wins(self.size, self.obstacles, self.tunnel, self.key, ALLOW_WAIT)
                 if (warder, prisoner, 0) not in wins:
@@ -713,6 +728,50 @@ class EscapeGame:
             return warder, prisoner
         warder, prisoner, self.key, self.obstacles, self.tunnel = fallback
         return warder, prisoner
+
+    def _fair_key_spot(self, key: Cell) -> bool:
+        if not self._key_has_two_routes(key):
+            return False
+        return not (KEY_LANTERN_CHECK and self._one_lantern_watches_key(key))
+
+    def _key_has_two_routes(self, key: Cell) -> bool:
+        """The key isn't a dead end, and no single square cuts it off from the tunnel.
+
+        Otherwise the footprints lead the warder to the key and it simply waits
+        on the only way out. If no square (a warder or a barricade) blocks every
+        route, there are two routes that share no square, and a tunnel with one
+        way in is ruled out too. Only squares on one shortest route need trying:
+        blocking any other square leaves that route open.
+        """
+
+        exits = [cell for cell in self._neighbors(key) if self._inside(cell) and cell not in self.obstacles]
+        if len(exits) < KEY_MIN_EXITS:
+            return False
+        distance = self._distances_from(key)
+        if self.tunnel not in distance:
+            return False
+        route, cell = [], self.tunnel
+        while distance[cell] > 1:
+            cell = next(n for n in self._neighbors(cell) if distance.get(n) == distance[cell] - 1)
+            route.append(cell)
+        return all(self.tunnel in self._distances_from(key, blocked={cell}) for cell in route)
+
+    def _one_lantern_watches_key(self, key: Cell) -> bool:
+        """Is there a square two from the key whose 3x3 lantern covers every way out?
+
+        The lantern there doesn't reach the key, but every way out passes through
+        it, so the warder can wait there and grab the prisoner on the way out.
+        Spots whose lantern covers the tunnel are left out: guarding the tunnel
+        is a different problem.
+        """
+
+        for spot in self._free_cells():
+            if ring_distance(spot, key) != 2 or ring_distance(spot, self.tunnel) <= 1:
+                continue
+            lantern = {(spot[0] + dr, spot[1] + dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)}
+            if self.tunnel not in self._distances_from(key, blocked=lantern):
+                return True
+        return False
 
     def _place_boxes(self) -> None:
         roles = self._roles()

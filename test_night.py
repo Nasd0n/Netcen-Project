@@ -510,6 +510,70 @@ class NightTests(unittest.TestCase):
             wins = prisoner_forced_wins(game.size, game.obstacles, game.tunnel, game.key)
             self.assertNotIn((w, p, 0), wins)
 
+    @staticmethod
+    def deal(seed):
+        game = EscapeGame(seed=seed, mode="night")
+        game.add_player("w", "W"); game.add_player("p", "P")
+        started = time.perf_counter()
+        game.start_match(forced_warder_id="w")
+        return game, time.perf_counter() - started
+
+    @staticmethod
+    def reaches_tunnel(game, blocked):
+        """Plain BFS from the key, with ``blocked`` as an extra wall."""
+        seen, pending = {game.key}, [game.key]
+        while pending:
+            r, c = pending.pop()
+            for cell in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if cell not in seen and cell != blocked and cell not in game.obstacles \
+                        and 0 <= cell[0] < game.size and 0 <= cell[1] < game.size:
+                    seen.add(cell)
+                    pending.append(cell)
+        return game.tunnel in seen
+
+    def test_the_key_always_has_two_separate_ways_out(self):
+        for seed in range(40):
+            game, _ = self.deal(seed)
+            key, size = game.key, game.size
+            exits = [(key[0] + dr, key[1] + dc) for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))]
+            exits = [c for c in exits if 0 <= c[0] < size and 0 <= c[1] < size and c not in game.obstacles]
+            self.assertGreaterEqual(len(exits), 2, seed)
+            self.assertTrue(self.reaches_tunnel(game, None), seed)
+            # No single square (a warder or a barricade) cuts the key off from the tunnel.
+            for row in range(size):
+                for col in range(size):
+                    if (row, col) not in game.obstacles and (row, col) not in (key, game.tunnel):
+                        self.assertTrue(self.reaches_tunnel(game, (row, col)), (seed, row, col))
+
+    def test_dead_ends_pockets_and_one_way_tunnels_are_refused(self):
+        game = self.game                                # open yard, tunnel at (9, 9)
+        self.assertTrue(game._key_has_two_routes((0, 5)))
+        game.obstacles = {(0, 1)}
+        self.assertFalse(game._key_has_two_routes((0, 0)))          # dead end: only (1, 0) is open
+        game.obstacles = {(0, 2), (1, 2), (2, 0), (2, 2)}
+        self.assertFalse(game._key_has_two_routes((0, 0)))          # pocket: (2, 1) is the only way out,
+        self.assertFalse(game._key_has_two_routes((1, 1)))          # even with two or three exits
+        game.obstacles = {(8, 9)}
+        self.assertFalse(game._key_has_two_routes((0, 5)))          # the tunnel has one way in, (9, 8)
+
+    def test_one_lantern_never_watches_every_way_out(self):
+        game = self.game
+        self.assertTrue(game._fair_key_spot((0, 5)))
+        # Two separate routes from (0, 0), but a warder on (2, 2) lights both
+        # without lighting the key: along row 0 into (1, 3), and down into (2, 1).
+        game.obstacles = {(0, 4), (1, 4), (3, 0)}
+        self.assertTrue(game._key_has_two_routes((0, 0)))
+        self.assertTrue(game._one_lantern_watches_key((0, 0)))
+        self.assertFalse(game._fair_key_spot((0, 0)))
+        for seed in range(20):
+            dealt, _ = self.deal(seed)
+            self.assertFalse(dealt._one_lantern_watches_key(dealt.key), seed)
+
+    def test_dealing_a_night_match_stays_quick(self):
+        times = [self.deal(seed)[1] for seed in range(100, 140)]
+        self.assertLess(max(times), 0.5)
+        self.assertLess(sum(times) / len(times), 0.15)
+
     # ----- Scout ----------------------------------------------------------
 
     def test_scout_prisoner_heads_for_the_key_first(self):

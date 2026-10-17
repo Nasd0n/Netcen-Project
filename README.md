@@ -83,7 +83,7 @@ In Classic, a careful prisoner almost always gets away. Night Escape was designe
 | Rule | How it works |
 | --- | --- |
 | **Big dark yard** | 10×10 with 20 walls. The warder's lantern lights only the 8 squares around them. The prisoner spots the warder from 2 squares away (one more than the warder). |
-| **Key** | The tunnel is locked until the prisoner picks up the key. Only the prisoner can see where it is. (When the warder knew the key's location, they just guarded it.) |
+| **Key** | The tunnel is locked until the prisoner picks up the key. Only the prisoner can see where it is. (When the warder knew the key's location, they just guarded it.) The key always has two separate ways out: at least 2 open squares next to it, and two routes to the tunnel that share no square, so no single square (the warder or a barricade) cuts it off from the tunnel. That also rules out a tunnel with only one way in. Nor can one warder two squares from the key light every way out with its 3×3 lantern while the key stays dark (`KEY_LANTERN_CHECK`). Before these rules, about a quarter of the keys sat in a dead end or a pocket: the footprints led the warder there, and it waited at the only way out. |
 | **Lock-on grab** | When the prisoner is in the warder's lantern light, a target locks onto their square and the warder clicks it to grab them (Q/E/Z/C also grab diagonally). If the warder's step brings the prisoner into view, the warder gets one extra click that turn. If they don't click before the timer runs out, the prisoner slips away. On a board this big the warder almost never caught anyone without this step-then-grab. |
 | **Footprints** | The warder sees where the prisoner stood 2 turns ago, anywhere on the map (smoke hides it). Without footprints the warder just camped at the tunnel. |
 | **Items** | The prisoner starts every match with a **Smoke bomb**. There are 4 item boxes on the map, 2 per player, and each player only sees their own. Each box shows the item inside: every player gets one box of each of their items. Warder: **Searchlight** (lights the whole yard for 2 warder turns) and **Barricade** (blocks a square within 2 for 3 rounds). Prisoner: **Smoke bomb** (invisible, no footprints, can't be seen for 3 moves) and **Sprint** (2 steps in one turn). |
@@ -173,6 +173,10 @@ Without waiting, solver-checked starts don't fix the balance: the distance betwe
 | --- | --- |
 | Before waiting and the start hint | 87% |
 | With waiting and the start hint | 86% |
+| + the key has two separate ways out (6,000 games) | 85.5% |
+| + no single lantern spot watches both (**final**, 6,000 games) | **84%** |
+
+Of the keys the old deal picked, 26% had a dead end (6%) or a single square that cut them off, and another 18% could be watched from one lantern spot. Dealing now throws away about 1 map in 8 (the tunnel itself is cut off, so no key spot passes) and takes about 39 ms instead of 35.
 
 These Night numbers say more about the bots than the rules. Scout's night prisoner doesn't remember where it last saw the warder, so it walks into the dark. Even with no random moves at all it loses 84%. With the step-and-grab removed entirely the warder still wins 81% of bot games. Night Escape needs a smarter prisoner bot, or real playtests, before its rules are tuned further.
 
@@ -181,7 +185,7 @@ These Night numbers say more about the bots than the rules. Scout's night prison
 ```bash
 python3 -m pytest -q
 ```
-Waiting has its own tests (`test_wait.py` for Classic, with both `ALLOW_WAIT` settings, and the Night cases in `test_night.py`): a wait passes the turn without moving, can't be done out of turn, and in Night Escape leaves footprints, counts down smoke and counts toward the lockdown. A hidden wait produces exactly the same real network messages as a move in the dark. `test_solver.py` checks both solvers on positions you can work out by hand. The fair-start test checks over many seeds that no Classic start is a guaranteed win for either side. The start-hint tests check that only the prisoner gets the 3×3 block, that it holds the warder (not always in the middle), stays put and disappears on time, and that the prisoner's real messages never carry the warder's square.
+Waiting has its own tests (`test_wait.py` for Classic, with both `ALLOW_WAIT` settings, and the Night cases in `test_night.py`): a wait passes the turn without moving, can't be done out of turn, and in Night Escape leaves footprints, counts down smoke and counts toward the lockdown. A hidden wait produces exactly the same real network messages as a move in the dark. `test_solver.py` checks both solvers on positions you can work out by hand. The fair-start test checks over many seeds that no Classic start is a guaranteed win for either side. The start-hint tests check that only the prisoner gets the 3×3 block, that it holds the warder (not always in the middle), stays put and disappears on time, and that the prisoner's real messages never carry the warder's square. The key tests check over many seeds that the key has at least 2 open neighbors, that blocking any single square never cuts it off from the tunnel, that no lantern spot two from the key watches every way out, and that dealing a Night match stays quick.
 
 The tests cover the game rules, Scout, and real TLS connections on localhost. The TLS tests check that two players can join and play, that moves out of turn are refused, that plain TCP and oversized messages are rejected, and that the client refuses a server with the wrong certificate. The Night Escape tests cover:
 - what each role can see
