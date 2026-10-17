@@ -1,5 +1,6 @@
 import unittest
 import time
+from unittest import mock
 
 from game import EscapeGame, OBSTACLE_COUNT, clean_nickname
 
@@ -122,13 +123,39 @@ class EscapeGameTests(unittest.TestCase):
             game.add_player("c", "\x07\x08")
 
     def test_starting_spots_are_fair(self):
-        for seed in range(40):
-            game = EscapeGame(seed=seed)
-            game.add_player("a", "A")
-            game.add_player("b", "B")
+        from solver import classic_outcomes
+
+        for allow_wait in (True, False):
+            with mock.patch("game.ALLOW_WAIT", allow_wait):
+                for seed in range(60):
+                    game = EscapeGame(seed=seed)
+                    game.add_player("a", "A")
+                    game.add_player("b", "B")
+                    game.start_match()
+                    roles = {p.role: p.position for p in game.players.values()}
+                    warder, prisoner, tunnel = roles["warder"], roles["prisoner"], game.tunnel
+                    # Neither side can force a win from the start (warder to move).
+                    forced = classic_outcomes(game.size, game.obstacles, tunnel, allow_wait)
+                    self.assertNotIn((warder, prisoner, "W"), forced, (seed, allow_wait))
+                    # Real walking distances; the tunnel is a wall for the warder.
+                    walk = game._distances_from(warder, blocked={tunnel})
+                    self.assertGreaterEqual(walk[prisoner], 3)
+                    self.assertGreaterEqual(game._distances_from(tunnel)[prisoner], 3)
+                    # The warder reaches every square without the tunnel, and the
+                    # tunnel has at least two ways in.
+                    self.assertEqual(len(walk), len(game._free_cells()))
+                    entrances = [c for c in game._neighbors(tunnel)
+                                 if game._inside(c) and c not in game.obstacles]
+                    self.assertGreaterEqual(len(entrances), 2)
+
+    def test_dealing_a_classic_match_is_quick(self):
+        game = EscapeGame(seed=3)
+        game.add_player("a", "A")
+        game.add_player("b", "B")
+        started = time.perf_counter()
+        for _ in range(20):
             game.start_match()
-            (r1, c1), (r2, c2) = (p.position for p in game.players.values())
-            self.assertGreaterEqual(abs(r1 - r2) + abs(c1 - c2), 3)
+        self.assertLess((time.perf_counter() - started) / 20, 0.05)
 
     def test_catch_records_reason_and_last_move(self):
         warder = self.game.players[self.game.turn_player_id]

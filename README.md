@@ -11,8 +11,8 @@ Written in Python 3.9+ with Tkinter. All traffic between the client and server i
 | `server.py` | Socket server + dashboard window (who's online, live map, reset button) |
 | `client.py` | Player window: nickname screen, board, timer, Scout hints, rematch |
 | `game.py` | Game rules: map generation, turns, timer, win checks, scores |
-| `ai.py` | Scout, the path-finding helper (breadth-first search) |
-| `solver.py` | Exact Night Escape solver used to deal fair starts |
+| `ai.py` | Scout, the hint helper (breadth-first search, plus the exact solver in Classic) |
+| `solver.py` | Exact game solvers for Classic and Night Escape, used to deal fair starts |
 | `security.py` | TLS certificate creation and certificate pinning |
 | `web.py` | Hand-written HTTP + WebSocket server for browser players |
 | `web/index.html` | The browser version of the game (works on phones too) |
@@ -20,6 +20,7 @@ Written in Python 3.9+ with Tkinter. All traffic between the client and server i
 | `protocol.py` | JSON-lines messages; one thread per connection |
 | `theme.py` | Colors, fonts, rounded buttons, character drawings |
 | `config.py` | Server IP and port (players never type these) |
+| `tools/balance.py` | Bot-vs-bot simulation that reports win rates (not run by the tests) |
 
 ## Running it
 
@@ -66,7 +67,7 @@ Browser players and desktop (`client.py`) players can play against each other. Y
 
 - The board is 5×5, with 19 open squares, 5 walls and 1 tunnel. Every new match gets a new random map. The server checks that every open square can be reached, so the map is never deadlocked.
 - The server picks the roles at random. The warder always moves first.
-- Starting spots are random but fair: the two players start at least 3 steps apart, and the prisoner starts at least 3 steps from the tunnel.
+- Starts are random but fair. An exact solver checks every Classic start, and neither side may have a guaranteed win from it (with perfect play from both, nobody could force the result). The players start at least 3 walking steps apart (the tunnel counts as a wall for the warder), and the prisoner starts at least 3 walking steps from the tunnel. Maps where the tunnel has only one way in (the warder could camp on it), or where the tunnel cuts the yard in two, are thrown away and a new map is made.
 - You get 10 seconds per turn. To move, click a highlighted square or use the arrow keys / WASD.
 - Instead of moving you can **wait** (the Wait button or Space). A wait uses up your turn exactly like a move, you just stay on your square. Both players can wait, in both modes. To play the assignment's original rule (you must move every turn), set `ALLOW_WAIT = False` in `game.py`.
 - The warder can't enter the tunnel, and the prisoner can't walk into the warder.
@@ -129,7 +130,8 @@ After that, copy the new `certs/server.crt` to the clients again.
 | --- | --- |
 | Scout: a breadth-first-search hint that shows the best next square on the board, or tells you to wait when staying put is best. In Night Escape it plans around the grab zone, and a warder who can't see follows the footprints. Browser players get the same hint from the server (`ai.py`), computed only from their own view. | ✓ |
 | Wait instead of moving (button or Space), with `ALLOW_WAIT` to switch back to the must-move rule | |
-| Night Escape: exact game-tree solver that deals only fair starts (no forced wins) | ✓ |
+| Exact game-tree solvers that deal only fair starts (no forced wins) in Classic and Night Escape | ✓ |
+| Scout in Classic: ranks every step and waiting with the exact solver (take a forced win, avoid a forced loss), then by walking distance | ✓ |
 | Night Escape mode: 10×10 fog of war for both sides, with server-side hidden information | |
 | Night Escape: secret key that unlocks the tunnel | |
 | Night Escape: step-and-grab + footprints | |
@@ -144,6 +146,26 @@ After that, copy the new `certs/server.crt` to the clients again.
 | Fair random starting positions | |
 | Countdown ring timer, footprints showing the last move, and a Win/Lost card | |
 | "Try again" reconnect button if the server goes down | |
+
+## Balance
+
+`python tools/balance.py` plays Scout against Scout through the real game engine. Each bot sees only its own view, and 15% of the moves are random so the bots make mistakes. The numbers are the warder's share of the games that finished.
+
+| Classic | Bots' Scout | Warder |
+| --- | --- | --- |
+| Before: must move, straight-line distance starts | breadth-first only | 42% |
+| Waiting allowed, same starts | breadth-first only | 49% |
+| Waiting allowed, same starts | with the solver | 43% |
+| + solver-checked starts (no guaranteed wins) | with the solver | 60% |
+| + walking distances, no maps split by the tunnel | with the solver | 60% |
+| + at least 2 ways into the tunnel (**final**) | with the solver | **58%** |
+| Final rules, but must move (`ALLOW_WAIT = False`) | with the solver | 24% |
+
+With the old starts, 40% of Classic starts were a guaranteed prisoner win and 9% a guaranteed warder win (with waiting allowed; 40% and 32% without). The final rules hold at 56-61% across 5-25% random moves. The breadth-first Scout made a poor prisoner (it walked right next to the warder), so with solver-checked starts it handed the warder 63%. That's why Scout's Classic advice now uses the solver for both sides.
+
+Two rules were tried and dropped. "The warder can reach a square next to the tunnel no later than the prisoner reaches the tunnel" changed nothing, because the solver check already rules those starts out. Capping the prisoner's walk to the tunnel at 4-5 steps moved the result by about 1%. Requiring 3 ways into the tunnel gives 56%, but it throws away about 40% of maps; `MIN_TUNNEL_ENTRANCES` in `game.py` sets it.
+
+Without waiting, solver-checked starts don't fix the balance: the distance between the players changes by exactly 1 every move, so on an even distance the warder can never be next to the prisoner on its own turn.
 
 ## Tests
 

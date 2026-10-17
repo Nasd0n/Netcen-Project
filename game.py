@@ -19,7 +19,7 @@ from random import Random
 import time
 import unicodedata
 
-from solver import prisoner_forced_wins
+from solver import classic_outcomes, prisoner_forced_wins
 
 
 TURN_SECONDS = 10
@@ -39,9 +39,13 @@ WALL_COUNTS = {"classic": 5, "night": 20}      # 20% of the board either way
 BOARD_SIZE = BOARD_SIZES["classic"]
 OBSTACLE_COUNT = WALL_COUNTS["classic"]
 
-# Classic starting spots are picked so nobody wins on the very first move.
-MIN_START_GAP = 3
-MIN_PRISONER_TO_TUNNEL = 3
+# Classic dealing, tuned with tools/balance.py. Every start is checked with the
+# exact solver: neither side may have a guaranteed win. Distances are real
+# walks (breadth-first search), and for the warder the tunnel is a wall.
+MIN_START_GAP = 3            # walking steps from the warder to the prisoner
+MIN_PRISONER_TO_TUNNEL = 3   # walking steps from the prisoner to the tunnel
+MIN_TUNNEL_ENTRANCES = 2     # open squares next to the tunnel (one lets the warder camp on it)
+CLASSIC_DEAL_TRIES = 30      # maps to try before falling back to the plain distance rule
 
 # Night Escape tuning (see README for the simulation results)
 LANTERN_RANGE = 1        # warder sees and catches within the 8 squares around them
@@ -199,8 +203,7 @@ class EscapeGame:
         if self.night:
             warder_start, prisoner_start = self._deal_night()
         else:
-            self._generate_map()
-            warder_start, prisoner_start = self._pick_starts(self._free_cells())
+            warder_start, prisoner_start = self._deal_classic()
         warder.position, prisoner.position = warder_start, prisoner_start
 
         for player in self.players.values():
@@ -720,8 +723,41 @@ class EscapeGame:
             player.boxes = {cell: items[i % len(items)] for i, cell in enumerate(chosen)}
             taken |= set(chosen)
 
+    def _deal_classic(self) -> tuple[Cell, Cell]:
+        """5x5 map and starts where neither side can force a win (exact solver)."""
+
+        for _ in range(CLASSIC_DEAL_TRIES):
+            self._generate_map()
+            if not self._fair_classic_map():
+                continue
+            free = self._free_cells()
+            to_tunnel = self._distances_from(self.tunnel)
+            forced = classic_outcomes(self.size, self.obstacles, self.tunnel, ALLOW_WAIT)
+            starts = []
+            for warder in free:
+                walk = self._distances_from(warder, blocked={self.tunnel})
+                for prisoner in free:
+                    if prisoner != warder and (warder, prisoner, "W") not in forced \
+                            and walk.get(prisoner, 0) >= MIN_START_GAP \
+                            and to_tunnel[prisoner] >= MIN_PRISONER_TO_TUNNEL:
+                        starts.append((warder, prisoner))
+            if starts:
+                return self.random.choice(starts)
+        return self._pick_starts(self._free_cells())    # practically never
+
+    def _fair_classic_map(self) -> bool:
+        """The tunnel isn't a dead end, and it doesn't cut the yard in two."""
+
+        entrances = [cell for cell in self._neighbors(self.tunnel)
+                     if self._inside(cell) and cell not in self.obstacles]
+        if len(entrances) < MIN_TUNNEL_ENTRANCES:
+            return False
+        free = self._free_cells()
+        # The warder can't walk through the tunnel, so it must reach every square without it.
+        return len(self._distances_from(free[0], blocked={self.tunnel})) == len(free)
+
     def _pick_starts(self, free_cells: list[Cell]) -> tuple[Cell, Cell]:
-        """Classic: random starting spots that don't hand either side a free win."""
+        """Fallback: random starting spots a fair straight-line distance apart."""
 
         fair = [
             (warder, prisoner)
@@ -753,13 +789,16 @@ class EscapeGame:
             if (row, col) not in self.obstacles and (row, col) != self.tunnel
         ]
 
-    def _distances_from(self, start: Cell) -> dict[Cell, int]:
+    def _distances_from(self, start: Cell, blocked: set[Cell] = frozenset()) -> dict[Cell, int]:
+        """Walking distance (BFS) to every square; ``blocked`` squares count as walls."""
+
         distance = {start: 0}
         pending = [start]
         while pending:
             current = pending.pop(0)
             for neighbor in self._neighbors(current):
-                if self._inside(neighbor) and neighbor not in self.obstacles and neighbor not in distance:
+                if self._inside(neighbor) and neighbor not in self.obstacles \
+                        and neighbor not in blocked and neighbor not in distance:
                     distance[neighbor] = distance[current] + 1
                     pending.append(neighbor)
         return distance

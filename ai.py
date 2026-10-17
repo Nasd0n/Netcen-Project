@@ -3,6 +3,12 @@
 Scout searches the board the player can currently see with breadth-first
 search and suggests one move. It never moves for you.
 
+In Classic both players see everything, so Scout also asks the exact game
+solver (solver.classic_outcomes) where each step leads: it takes a forced win
+when there is one, never walks into a forced loss when it can avoid it, and
+uses breadth-first distances to choose between the safe steps (the prisoner
+heads for the tunnel, the warder closes in).
+
 In Night Escape it plays by the night rules: the prisoner goes for the key
 first, then the tunnel, and stays out of the warder's step-and-grab reach (2 squares);
 a warder who can't see the prisoner follows the footprints, or guards the
@@ -12,6 +18,9 @@ tunnel if there are none.
 from __future__ import annotations
 
 from collections import deque
+from functools import lru_cache
+
+from solver import classic_outcomes
 
 
 DIRECTIONS = (
@@ -139,6 +148,9 @@ def suggest_move(state: dict, player_id: str) -> str | None:
     if target[0] is None or target[1] is None:
         return "Scout AI cannot see the tunnel yet."
 
+    if not night and opponent_position is not None and role in ("warder", "prisoner"):
+        return _classic_advice(board, role, start, opponent_position, target, bool(state.get("allow_wait")))
+
     if role == "prisoner":
         night_info = state.get("night") or {}
         goal, goal_name = target, "tunnel"
@@ -213,6 +225,89 @@ def suggest_move(state: dict, player_id: str) -> str | None:
         )
 
     return "Scout AI is waiting for your role."
+
+
+@lru_cache(maxsize=16)
+def _classic_table(size: int, walls: frozenset, tunnel: tuple[int, int], allow_wait: bool) -> dict:
+    return classic_outcomes(size, set(walls), tunnel, allow_wait)
+
+
+def _distances(board: list[str], start: tuple[int, int], blocked: set) -> dict:
+    size = len(board)
+    distance = {start: 0}
+    queue = deque([start])
+    while queue:
+        current = queue.popleft()
+        for _, (dr, dc) in DIRECTIONS:
+            cell = (current[0] + dr, current[1] + dc)
+            if _inside(cell, size) and board[cell[0]][cell[1]] != "#" \
+                    and cell not in blocked and cell not in distance:
+                distance[cell] = distance[current] + 1
+                queue.append(cell)
+    return distance
+
+
+def _classic_advice(board, role, me, other, tunnel, allow_wait) -> str:
+    """Classic: rank each step (and waiting) with the exact solver, then by distance."""
+
+    size = len(board)
+    walls = frozenset((r, c) for r in range(size) for c in range(size) if board[r][c] == "#")
+    table = _classic_table(size, walls, tunnel, allow_wait)
+    warder = role == "warder"
+    options = []
+    for name, (dr, dc) in DIRECTIONS:
+        cell = (me[0] + dr, me[1] + dc)
+        if not _inside(cell, size) or cell in walls:
+            continue
+        if warder and cell == other:
+            return "Move %s to catch the prisoner." % name.upper()
+        if not warder and cell == tunnel:
+            return "Move %s to enter the tunnel and escape." % name.upper()
+        if (warder and cell == tunnel) or (not warder and cell == other):
+            continue
+        options.append((name, cell))
+    if allow_wait:
+        options.append((WAIT, me))
+    if not options:
+        return "You have no legal step, so your turn will pass."
+
+    side, reply = ("W", "P") if warder else ("P", "W")
+    if warder:
+        distance = _distances(board, other, {tunnel})          # how close each square is to them
+    else:
+        distance = _distances(board, tunnel, {other})          # how close each square is to the tunnel
+
+    def rank(option):
+        name, cell = option
+        position = (cell, other, reply) if warder else (other, cell, reply)
+        outcome = table.get(position)
+        if outcome is None:
+            value, plies = 1, 0                               # nobody can force it from here
+        elif outcome[0] == side:
+            value, plies = 2, -outcome[1]                     # a forced win: the quicker the better
+        else:
+            value, plies = 0, outcome[1]                      # a forced loss: hold out longest
+        return value, plies, -distance.get(cell, 99), name != WAIT
+
+    name, cell = max(options, key=rank)
+    value, plies, _, _ = rank((name, cell))
+    head = "Wait" if name == WAIT else "Move %s" % name.upper()
+    if value == 2:
+        moves = -plies // 2 + 1
+        goal = "catch" if warder else "escape"
+        return "%s: you can force a%s %s in %d move%s." % (
+            head, "" if goal == "catch" else "n", goal, moves, "" if moves == 1 else "s")
+    if value == 0:
+        if warder:
+            return "%s: they can force an escape now, so make it as long as you can." % head
+        return "%s: the warder can force a catch now; this keeps you free longest." % head
+    if warder:
+        if name == WAIT:
+            return "Wait: holding still keeps the tunnel covered."
+        return "%s: closes in without letting them force an escape." % head
+    if name == WAIT:
+        return "Wait: every step toward the tunnel walks into a trap right now."
+    return "%s: the tunnel is %d steps away and this square is safe." % (head, distance.get(cell, 0) + 1)
 
 
 def _back_off(state, board, start, warder, blocked) -> str:
