@@ -49,7 +49,22 @@
   }
   #name:focus { border-color: var(--sun); }
   #join .pill { width: 100%; margin-top: 14px; font-size: 16px; }
+  #join .field { text-align: left; font-weight: 700; margin: 18px 0 6px; }
   #status { margin-top: 16px; font-size: 14px; }
+
+  /* side picker: Warder / Prisoner / Either */
+  .sides { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .sides button {
+    border: 0; border-radius: 999px; padding: 9px 4px; font-weight: 700; color: #fff; background: #cbbfa8;
+    cursor: pointer; box-shadow: 0 3px 0 rgba(0,0,0,.18); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .sides button[aria-checked="true"][data-side="warder"] { background: var(--warder); }
+  .sides button[aria-checked="true"][data-side="prisoner"] { background: var(--prisoner); }
+  .sides button[aria-checked="true"][data-side="any"] { background: var(--ink); }
+  .sides button:focus-visible { outline: 3px solid var(--sun); outline-offset: 2px; }
+  .side-note { font-size: 13px; margin-top: 6px; }
+  .overlay .sides { margin-top: 6px; }
+  .overlay .sides button { padding: 7px 4px; font-size: 13px; }
   #status::before { content: "\25CF  "; }
   #lobby { font-size: 14px; margin-top: 2px; }
 
@@ -91,7 +106,7 @@
   .flash #board { box-shadow: 0 0 0 4px var(--bad); }
 
   .overlay {
-    position: absolute; inset: 0; display: grid; place-items: center; padding: 16%;
+    position: absolute; inset: 0; display: grid; place-items: center; padding: 8%;
   }
   .overlay .card { width: 100%; padding: 22px 18px; text-align: center; box-shadow: 4px 8px 0 #d8c8aa; }
   .overlay .big { font-size: 42px; font-weight: 800; line-height: 1; }
@@ -188,6 +203,12 @@
     <div class="muted">One of you guards the yard. The other one digs out.</div>
     <label for="name">What should we call you?</label>
     <input id="name" maxlength="16" autocomplete="nickname" autocapitalize="words" spellcheck="false">
+    <div class="field" id="joinSideLabel">Which side do you want to play?</div>
+    <div class="sides" role="radiogroup" aria-labelledby="joinSideLabel">
+      <button type="button" role="radio" data-side="warder" aria-checked="false">Warder</button>
+      <button type="button" role="radio" data-side="prisoner" aria-checked="false">Prisoner</button>
+      <button type="button" role="radio" data-side="any" aria-checked="true">Either</button>
+    </div>
     <button class="pill orange" id="joinBtn" disabled>Join the game</button>
     <div id="status" class="faint">Connecting...</div>
     <div id="lobby" class="muted"></div>
@@ -212,7 +233,13 @@
           <div class="big" id="resultBig"></div>
           <p id="resultLine"></p>
           <p class="muted" id="resultScore" style="font-weight:700"></p>
-          <p class="faint" style="font-size:13px">Winner plays warder next round.</p>
+          <p style="font-weight:700;font-size:14px" id="overlaySideLabel">Side I want next match</p>
+          <div class="sides" role="radiogroup" aria-labelledby="overlaySideLabel">
+            <button type="button" role="radio" data-side="warder" aria-checked="false">Warder</button>
+            <button type="button" role="radio" data-side="prisoner" aria-checked="false">Prisoner</button>
+            <button type="button" role="radio" data-side="any" aria-checked="true">Either</button>
+          </div>
+          <p class="muted side-note" id="overlaySide"></p>
         </div></div>
       </div>
       <div class="empty hidden" id="empty">
@@ -245,6 +272,15 @@
         <div id="itemHint" class="muted" style="font-size:13px;margin-top:8px"></div>
       </div>
       <button class="pill green" id="rematch" disabled>Rematch</button>
+      <div class="card box">
+        <h3 id="sideCardLabel">Side I want next match</h3>
+        <div class="sides" role="radiogroup" aria-labelledby="sideCardLabel">
+          <button type="button" role="radio" data-side="warder" aria-checked="false">Warder</button>
+          <button type="button" role="radio" data-side="prisoner" aria-checked="false">Prisoner</button>
+          <button type="button" role="radio" data-side="any" aria-checked="true">Either</button>
+        </div>
+        <div class="muted side-note" id="sideNote"></div>
+      </div>
       <div class="card box">
         <h3>In the room</h3>
         <ul id="room"></ul>
@@ -331,6 +367,8 @@ $("emptyArt").innerHTML = `<g transform="translate(70 60) scale(1.4)">${TUNNEL}<
 const key = new URLSearchParams(location.hash.slice(1)).get("key") || "";
 let ws = null, connected = false, inGame = false, nickname = "", me = null, state = null;
 let lastTurn = null, deadline = null, hint = null, rematchSent = false, lastMatch = 0;
+let side = "any";                       // which side I'd like next match
+const SIDE_LABEL = { warder: "Warder", prisoner: "Prisoner", any: "Either" };
 const feed = [];
 
 /* ---------- connection ---------- */
@@ -401,7 +439,7 @@ function join() {
   if (!connected) return;
   if (!name) { setStatus("Type a nickname first.", "bad"); return; }
   nickname = name;
-  send({ type: "join", nickname: name });
+  send({ type: "join", nickname: name, side });
   $("joinBtn").disabled = true; $("joinBtn").textContent = "Joining..."; $("name").disabled = true;
 }
 $("joinBtn").onclick = join;
@@ -438,8 +476,32 @@ function apply(s) {
   lastTurn = turn;
   document.body.classList.toggle("night", s.mode === "night");
   $("modeChip").classList.toggle("hidden", s.mode !== "night");
-  renderPlayers(); renderTurn(); renderRoom(); renderButtons(); renderItem(); renderBoard();
+  if (mine().side in SIDE_LABEL) side = mine().side;
+  renderPlayers(); renderTurn(); renderSides(); renderRoom(); renderButtons(); renderItem(); renderBoard();
 }
+
+/* ---------- side picks (used when the next match starts) ---------- */
+function sideStatus() {
+  const o = other();
+  if (!o.id) return "Your pick is used when the next match starts.";
+  const theirs = o.side || "any";
+  let text = `${o.nickname} wants: ${SIDE_LABEL[theirs] || "Either"}.`;
+  if (theirs === side && theirs !== "any") text += " Same pick, so the last winner gets it.";
+  return text;
+}
+function renderSides() {
+  document.querySelectorAll(".sides button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.side === side)));
+  const text = sideStatus();
+  $("sideNote").textContent = text;
+  $("overlaySide").textContent = text;
+}
+function pickSide(s) {
+  if (!(s in SIDE_LABEL) || s === side) return;
+  side = s;
+  if (inGame) send({ type: "side", side: s });
+  renderSides();
+}
+document.querySelectorAll(".sides button").forEach((b) => { b.onclick = () => pickSide(b.dataset.side); });
 
 function renderPlayers() {
   const box = $("players");

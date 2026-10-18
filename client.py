@@ -33,6 +33,10 @@ ITEM_INFO = {
 }
 
 
+SIDE_LABELS = {"warder": "Warder", "prisoner": "Prisoner", "any": "Either"}
+SIDE_COLORS = {"warder": WARDER, "prisoner": PRISONER, "any": INK}
+SIDE_OFF = "#cbbfa8"
+
 BOARD_PX = 500
 STEPS = {"up": (-1, 0), "down": (1, 0), "left": (0, -1), "right": (0, 1)}
 DIAGONALS = {"up-left": (-1, -1), "up-right": (-1, 1), "down-left": (1, -1), "down-right": (1, 1)}
@@ -73,6 +77,9 @@ class EscapeClient:
         self.hint_direction: Optional[str] = None
         self.placing = False
         self.feed: list[str] = []
+        self.side = "any"                       # which side I'd like next match
+        self.side_pickers: list[dict[str, PillButton]] = []
+        self.side_note: Optional[tk.Label] = None
 
         self._build_login()
         root.bind("<KeyPress>", self._on_key)
@@ -219,6 +226,10 @@ class EscapeClient:
         self.name_entry.insert(0, self.nickname)
         self.name_entry.bind("<Return>", lambda _e: self.join())
 
+        tk.Label(inner, text="Which side do you want to play?", bg=CARD, fg=INK,
+                 font=Fonts.get(12, "bold")).pack(anchor="w")
+        self._side_picker(inner, width=380, height=38).pack(fill="x", pady=(6, 16))
+
         self.join_button = PillButton(inner, "Join the game", command=self.join,
                                       color=PRISONER, width=380, height=46, font_size=13)
         self.join_button.pack()
@@ -252,7 +263,7 @@ class EscapeClient:
             self._set_status("Type a nickname first.", BAD)
             return
         self.nickname = name
-        self._send({"type": "join", "nickname": name})
+        self._send({"type": "join", "nickname": name, "side": self.side})
         self.join_button.configure_button(enabled=False, text="Joining...")
         self.name_entry.configure(state="disabled")
 
@@ -302,6 +313,16 @@ class EscapeClient:
         self.board.bind("<Motion>", self._on_board_hover)
         self.board.bind("<Leave>", lambda _e: self._set_hover(None))
         self.board.bind("<Button-1>", self._on_board_click)
+
+        # Side for the next match, in the space under the board
+        side_row = tk.Frame(left, bg=PAPER)
+        side_row.pack(fill="x", pady=(12, 0))
+        tk.Label(side_row, text="Side I want next match", bg=PAPER, fg=INK,
+                 font=Fonts.get(12, "bold")).pack(side="left")
+        self._side_picker(side_row, width=290, height=30, font_size=10, bg=PAPER).pack(side="right")
+        self.side_note = tk.Label(left, text="", bg=PAPER, fg=SOFT, font=Fonts.get(10),
+                                  wraplength=BOARD_PX, justify="left", anchor="w")
+        self.side_note.pack(fill="x", pady=(4, 0))
 
         # Turn + timer
         turn = card(right, fill="x")
@@ -401,8 +422,12 @@ class EscapeClient:
         elif not night and self.item_card.winfo_ismapped():
             self.item_card.pack_forget()
 
+        mine = self._me().get("side")
+        if mine in SIDE_LABELS:
+            self.side = mine
         self._render_chips()
         self._render_turn()
+        self._render_side()
         self._render_room()
         self._render_buttons()
         self._render_item()
@@ -580,6 +605,49 @@ class EscapeClient:
                 label += " is picking a name"
             tk.Label(row, text=label, bg=CARD, fg=INK if joined else SOFT,
                      font=Fonts.get(11)).pack(side="left", padx=6)
+
+    # ----- side picks ------------------------------------------------------
+
+    def _side_picker(self, parent: tk.Misc, width: int, height: int, font_size: int = 11,
+                     bg: str = CARD) -> tk.Frame:
+        row = tk.Frame(parent, bg=bg)
+        gap = 8
+        buttons = {}
+        for index, side in enumerate(SIDE_LABELS):
+            button = PillButton(row, SIDE_LABELS[side], command=lambda s=side: self.pick_side(s),
+                                width=(width - 2 * gap) // 3, height=height, font_size=font_size, bg=bg)
+            button.pack(side="left", padx=(0, gap) if index < 2 else 0)
+            buttons[side] = button
+        self.side_pickers.append(buttons)
+        self._render_side()
+        return row
+
+    def _side_status(self) -> str:
+        other = self._opponent()
+        if not other:
+            return "Your pick is used when the next match starts."
+        theirs = other.get("side", "any")
+        text = "%s wants: %s." % (other.get("nickname", "Your opponent"), SIDE_LABELS.get(theirs, "Either"))
+        if theirs == self.side and theirs != "any":
+            text += " Same pick, so the last winner gets it."
+        return text
+
+    def _render_side(self) -> None:
+        for buttons in self.side_pickers:
+            for side, button in buttons.items():
+                if button.winfo_exists():
+                    button.configure_button(color=SIDE_COLORS[side] if side == self.side else SIDE_OFF)
+        if self.in_game and self.side_note is not None:
+            self.side_note.configure(text=self._side_status())
+
+    def pick_side(self, side: str) -> None:
+        if side not in SIDE_LABELS or side == self.side:
+            return
+        self.side = side
+        if self.in_game:
+            self._send({"type": "side", "side": side})
+            self._draw_board()
+        self._render_side()
 
     def _render_buttons(self) -> None:
         state = self.state or {}
@@ -812,19 +880,32 @@ class EscapeClient:
             line = "You made it out through the tunnel." if won else "%s escaped through the tunnel." % other.get("nickname")
         else:
             line = "You caught %s." % other.get("nickname") if won else "%s caught you." % other.get("nickname")
-        x1, y1, x2, y2 = 70, 150, BOARD_PX - 70, BOARD_PX - 150
+        x1, y1, x2, y2 = 60, 115, BOARD_PX - 60, BOARD_PX - 115
         rounded_rect(canvas, x1 + 4, y1 + 8, x2 + 4, y2 + 8, radius=24, fill="#d8c8aa", outline="")
         rounded_rect(canvas, x1, y1, x2, y2, radius=24, fill=CARD, outline=LINE, width=2)
-        canvas.create_text(BOARD_PX / 2, y1 + 48, text="Win" if won else "Lost",
+        canvas.create_text(BOARD_PX / 2, y1 + 44, text="Win" if won else "Lost",
                            fill=GOOD if won else BAD, font=Fonts.get(36, "bold"))
-        canvas.create_text(BOARD_PX / 2, y1 + 96, text=line, fill=INK, font=Fonts.get(13))
+        canvas.create_text(BOARD_PX / 2, y1 + 88, text=line, fill=INK, font=Fonts.get(13))
         canvas.create_text(
-            BOARD_PX / 2, y1 + 132,
+            BOARD_PX / 2, y1 + 120,
             text="%s  %d  -  %d  %s" % (me.get("nickname", "You"), me.get("score", 0),
                                          other.get("score", 0), other.get("nickname", "")),
             fill=SOFT, font=Fonts.get(14, "bold"))
-        canvas.create_text(BOARD_PX / 2, y2 - 22, text="Winner plays warder next round.",
-                           fill=FAINT, font=Fonts.get(11))
+        # Pick a side for the rematch right here.
+        canvas.create_text(BOARD_PX / 2, y1 + 160, text="Side I want next match",
+                           fill=INK, font=Fonts.get(11, "bold"))
+        width, gap, top = 104, 10, y1 + 176
+        left = BOARD_PX / 2 - (3 * width + 2 * gap) / 2
+        for index, side in enumerate(SIDE_LABELS):
+            bx = left + index * (width + gap)
+            tag = "side-" + side
+            rounded_rect(canvas, bx, top, bx + width, top + 32, radius=16, outline="", tags=tag,
+                         fill=SIDE_COLORS[side] if side == self.side else SIDE_OFF)
+            canvas.create_text(bx + width / 2, top + 16, text=SIDE_LABELS[side], fill="white",
+                               font=Fonts.get(11, "bold"), tags=tag)
+            canvas.tag_bind(tag, "<Button-1>", lambda _e, s=side: self.pick_side(s))
+        canvas.create_text(BOARD_PX / 2, y2 - 26, text=self._side_status(), fill=SOFT,
+                           font=Fonts.get(10), width=x2 - x1 - 30, justify="center")
 
     def _flash_board(self) -> None:
         self.board.create_rectangle(2, 2, BOARD_PX - 2, BOARD_PX - 2, outline=BAD, width=4, tags="flash")
@@ -867,7 +948,8 @@ class EscapeClient:
             self.hover_cell = cell
             self._draw_board()
         clickable = cell in self._placeable() if self.placing else cell in self._targets()
-        self.board.configure(cursor="hand2" if clickable else "")
+        on_pick = any(tag.startswith("side-") for tag in self.board.gettags("current"))
+        self.board.configure(cursor="hand2" if clickable or on_pick else "")
 
     def _on_board_hover(self, event) -> None:
         self._set_hover(self._cell_at(event.x, event.y))
@@ -929,6 +1011,8 @@ class EscapeClient:
     def _clear(self) -> None:
         for child in self.root.winfo_children():
             child.destroy()
+        self.side_pickers = []
+        self.side_note = None
 
     def close(self) -> None:
         if self.channel is not None:

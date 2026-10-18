@@ -107,6 +107,31 @@ class WebTests(unittest.TestCase):
         self.assertEqual(state["type"], "state")
         self.assertEqual(state["state"]["players"][0]["nickname"], "Webby")
 
+    def test_browser_player_picks_a_side(self):
+        sock, head = ws_connect(self.web.port, self.web.key)
+        self.assertIn("101", head)
+        self.assertEqual(ws_read(sock)["type"], "hello")
+        ws_send(sock, {"type": "join", "nickname": "Webby", "side": "boss"})
+        self.assertEqual(ws_read(sock)["type"], "error")
+        ws_send(sock, {"type": "join", "nickname": "Webby", "side": "warder"})
+        self.assertEqual(ws_read(sock)["type"], "welcome")
+        self.assertEqual(ws_read(sock)["state"]["players"][0]["side"], "warder")
+        ws_send(sock, {"type": "side", "side": "prisoner"})
+        self.assertEqual(ws_read(sock)["state"]["players"][0]["side"], "prisoner")
+        page = self.web_page()
+        self.assertIn(b'data-side="warder"', page)
+        self.assertIn(b'type: "side"', page)
+
+    def web_page(self) -> bytes:
+        sock = socket.create_connection(("127.0.0.1", self.web.port), timeout=5)
+        sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        data = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return data
+            data += chunk
+
 
 if __name__ == "__main__":
     unittest.main()
