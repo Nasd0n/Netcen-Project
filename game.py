@@ -19,11 +19,16 @@ from random import Random
 import time
 import unicodedata
 
-from solver import prisoner_forced_wins
+from solver import classic_outcomes, clear_line, prisoner_forced_wins, reach
 
 
 TURN_SECONDS = 10
 NICKNAME_MAX = 16
+
+# Either player may wait (stay put) instead of moving. Set to False for the
+# original assignment rules, where a player has to move every turn.
+ALLOW_WAIT = True
+WAIT = "stay"
 
 MODES = ("classic", "night")
 MODE_NAMES = {"classic": "Classic", "night": "Night Escape"}
@@ -34,13 +39,19 @@ WALL_COUNTS = {"classic": 5, "night": 20}      # 20% of the board either way
 BOARD_SIZE = BOARD_SIZES["classic"]
 OBSTACLE_COUNT = WALL_COUNTS["classic"]
 
-# Classic starting spots are picked so nobody wins on the very first move.
-MIN_START_GAP = 3
-MIN_PRISONER_TO_TUNNEL = 3
+# Classic dealing, tuned with tools/balance.py. Every start is checked with the
+# exact solver: neither side may have a guaranteed win. Distances are real
+# walks (breadth-first search), and for the warder the tunnel is a wall.
+MIN_START_GAP = 3            # walking steps from the warder to the prisoner
+MIN_PRISONER_TO_TUNNEL = 3   # walking steps from the prisoner to the tunnel
+MIN_TUNNEL_ENTRANCES = 2     # open squares next to the tunnel (one lets the warder camp on it)
+CLASSIC_DEAL_TRIES = 30      # maps to try before falling back to the plain distance rule
 
 # Night Escape tuning (see README for the simulation results)
 LANTERN_RANGE = 1        # warder sees and catches within the 8 squares around them
 PRISONER_VISION = 2      # prisoner sees the warder one square further
+# Neither side sees through walls, and nobody grabs diagonally between two
+# walls that touch at a corner (solver.clear_line).
 FOOTPRINT_AGE = 2        # the warder sees where the prisoner stood 2 turns ago, anywhere
 SEARCHLIGHT_TURNS = 2    # the searchlight lights the yard for 2 warder turns
 SMOKE_TURNS = 3          # smoke hides the prisoner for 3 of their moves
@@ -52,6 +63,10 @@ MAX_ITEMS = 2
 LOCKDOWN_ROUNDS = 60
 NIGHT_START_GAP = 6
 NIGHT_WARDER_TO_TUNNEL = 3   # no camping on the tunnel from the first move
+KEY_MIN_EXITS = 2            # open squares next to the key (one is a dead end the warder can wait at)
+KEY_LANTERN_CHECK = True     # also: no single lantern spot near the key watches every way out
+START_HINT_SIZE = 3          # the prisoner's start hint: a 3x3 block that holds the warder
+START_HINT_TURNS = 2         # shown on the prisoner's first turn, then faded for one more
 ITEMS_FOR_ROLE = {"warder": ("searchlight", "barricade"), "prisoner": ("smoke", "sprint")}
 ITEM_NAMES = {"searchlight": "Searchlight", "barricade": "Barricade",
               "smoke": "Smoke bomb", "sprint": "Sprint"}
@@ -148,6 +163,7 @@ class EscapeGame:
         self.sprint_steps = 0
         self.barricades: dict[Cell, int] = {}       # square -> rounds left
         self.rounds = 0
+        self.start_hint: Cell | None = None         # top-left square of the 3x3 block, chosen once
 
     # ------------------------------------------------------------------
     # Players and matches
@@ -194,8 +210,7 @@ class EscapeGame:
         if self.night:
             warder_start, prisoner_start = self._deal_night()
         else:
-            self._generate_map()
-            warder_start, prisoner_start = self._pick_starts(self._free_cells())
+            warder_start, prisoner_start = self._deal_classic()
         warder.position, prisoner.position = warder_start, prisoner_start
 
         for player in self.players.values():
@@ -238,6 +253,8 @@ class EscapeGame:
         other = self._other(player_id)
         name = direction.strip().lower()
 
+        if name == WAIT:
+            return self._wait(player, other)
         if name in DIAGONALS:
             dr, dc = DIAGONALS[name]
             return self.catch(player_id, (player.position[0] + dr, player.position[1] + dc))
@@ -315,6 +332,33 @@ class EscapeGame:
             return f"{player.nickname} is sprinting..."
         return self._end_prisoner_turn(player, other)
 
+    def _wait(self, player: Player, other: Player) -> tuple[bool, str]:
+        """Stay put. It uses up the turn exactly like a step would."""
+
+        if not ALLOW_WAIT:
+            return False, "You have to move every turn."
+        if self.lunge:
+            return False, "You already moved. Click the prisoner to grab them!"
+        self.last_move = None
+        if not self.night:
+            self._switch_turn()
+            return True, f"{player.nickname} waited. {other.nickname}'s turn."
+
+        # In the dark a wait must look exactly like a step, unless the other
+        # side can see you standing there anyway.
+        if player.role == "prisoner":
+            seen = self.prisoner_visible_to_warder()
+            self._pick_up(player)
+            text = self._end_prisoner_turn(player, other)   # footprints, smoke, rounds, barricades
+        else:
+            seen = self.warder_visible_to_prisoner()
+            self._pick_up(player)
+            self._switch_turn()                             # never a step-and-grab
+            text = f"{player.nickname} moved in the dark. {other.nickname}'s turn."
+        if seen and self.status == "playing":
+            text = f"{player.nickname} waited. {other.nickname}'s turn."
+        return True, text
+
     def _end_prisoner_turn(self, prisoner: Player, warder: Player) -> str:
         self.sprint_steps = 0
         self.trail.append((prisoner.position, self.smoke > 0))
@@ -333,7 +377,7 @@ class EscapeGame:
         if not warder or not prisoner:
             return False
         seen = self.searchlight or self.smoke == 0
-        return seen and ring_distance(warder.position, prisoner.position) <= LANTERN_RANGE
+        return seen and reach(warder.position, prisoner.position, self.obstacles)
 
     def _warder_senses(self) -> bool:
         """Prisoner hidden in smoke but right beside the warder: the warder may guess."""
@@ -342,7 +386,7 @@ class EscapeGame:
         warder, prisoner = roles.get("warder"), roles.get("prisoner")
         if not self.night or not warder or not prisoner or self.searchlight or self.smoke == 0:
             return False
-        return ring_distance(warder.position, prisoner.position) <= LANTERN_RANGE
+        return reach(warder.position, prisoner.position, self.obstacles)
 
     def catch(self, player_id: str, target: object) -> tuple[bool, str]:
         """Night Escape: the warder clicks a square next to them to grab the prisoner."""
@@ -364,6 +408,8 @@ class EscapeGame:
         if not self._inside(cell) or cell in self.obstacles \
                 or ring_distance(cell, player.position) != LANTERN_RANGE:
             return False, "You can only grab a square right next to you."
+        if not clear_line(player.position, cell, self.obstacles):
+            return False, "Two walls block that corner. You can't reach through."
 
         other = self._other(player_id)
         blind = self.smoke > 0 and not self.searchlight
@@ -456,7 +502,7 @@ class EscapeGame:
         options.sort()
         if player.role == "prisoner" and self.night:
             # A random stumble shouldn't walk straight into the lantern if avoidable.
-            safe = [o for o in options if ring_distance(o[1], other.position) > LANTERN_RANGE]
+            safe = [o for o in options if not reach(other.position, o[1], self.obstacles)]
             options = safe or options
         return options
 
@@ -512,7 +558,7 @@ class EscapeGame:
             return True
         if self.smoke > 0:
             return False
-        return ring_distance(warder.position, prisoner.position) <= LANTERN_RANGE
+        return reach(warder.position, prisoner.position, self.obstacles)
 
     def warder_visible_to_prisoner(self) -> bool:
         if not self.night or self.status != "playing":
@@ -521,7 +567,8 @@ class EscapeGame:
         warder, prisoner = roles.get("warder"), roles.get("prisoner")
         if not warder or not prisoner or warder.position is None or prisoner.position is None:
             return True
-        return ring_distance(warder.position, prisoner.position) <= PRISONER_VISION
+        return ring_distance(warder.position, prisoner.position) <= PRISONER_VISION \
+            and clear_line(prisoner.position, warder.position, self.obstacles)
 
     def footprints(self) -> list[tuple[Cell, int]]:
         """Where the prisoner stood 2 turns ago (unless smoke hid it). Visible anywhere."""
@@ -579,6 +626,7 @@ class EscapeGame:
             "status": self.status,
             "mode": self.mode,
             "mode_name": MODE_NAMES[self.mode],
+            "allow_wait": ALLOW_WAIT,
             "size": self.size,
             "match_number": self.match_number,
             "board": ["".join(row) for row in board],
@@ -621,8 +669,9 @@ class EscapeGame:
             "prisoner_hidden": hidden_role == "prisoner",
             "warder_hidden": hidden_role == "warder",
             "rounds_left": max(0, LOCKDOWN_ROUNDS - self.rounds),
-            # Only the prisoner knows about the key.
+            # Only the prisoner knows about the key, and gets the start hint.
             "key": list(self.key) if (prisoner_side and self.key) else None,
+            "start_hint": self.start_hint_view() if prisoner_side else None,
             "has_key": self.has_key if prisoner_side else None,
             "my_items": list(viewer.items) if viewer else [],
             # Each player sees only their own boxes, and what is inside them.
@@ -639,13 +688,17 @@ class EscapeGame:
     # ------------------------------------------------------------------
 
     def _deal_night(self) -> tuple[Cell, Cell]:
-        """10x10 map, key and starts. The solver rejects deals the prisoner wins by force."""
+        """10x10 map, key and starts. The solver rejects deals the prisoner wins by force.
+
+        The key always has two separate ways out (see _fair_key_spot).
+        """
 
         fallback = None
         for _ in range(30):
             self._generate_map()
             free = self._free_cells()
             distance = self._distances_from(self.tunnel)
+            fair_keys: dict[Cell, bool] = {}      # key spot -> passes _fair_key_spot, on this map
             for _ in range(40):
                 warder, prisoner = self.random.sample(free, 2)
                 if (manhattan(warder, prisoner) < NIGHT_START_GAP
@@ -658,11 +711,20 @@ class EscapeGame:
                         and manhattan(c, prisoner) >= NIGHT_START_GAP - 1
                         and manhattan(c, self.tunnel) >= NIGHT_START_GAP - 1
                         and ring_distance(c, warder) > LANTERN_RANGE]
-                if not keys:
+                # Shuffled and checked lazily: the first spot that passes is a fair
+                # random pick among the spots that pass, without checking them all.
+                self.random.shuffle(keys)
+                self.key = None
+                for key in keys:
+                    if key not in fair_keys:
+                        fair_keys[key] = self._fair_key_spot(key)
+                    if fair_keys[key]:
+                        self.key = key
+                        break
+                if self.key is None:
                     continue
-                self.key = self.random.choice(keys)
                 fallback = fallback or (warder, prisoner, self.key, set(self.obstacles), self.tunnel)
-                wins = prisoner_forced_wins(self.size, self.obstacles, self.tunnel, self.key)
+                wins = prisoner_forced_wins(self.size, self.obstacles, self.tunnel, self.key, ALLOW_WAIT)
                 if (warder, prisoner, 0) not in wins:
                     return warder, prisoner
         if fallback is None:  # practically never: take any legal spots
@@ -671,6 +733,51 @@ class EscapeGame:
             return warder, prisoner
         warder, prisoner, self.key, self.obstacles, self.tunnel = fallback
         return warder, prisoner
+
+    def _fair_key_spot(self, key: Cell) -> bool:
+        if not self._key_has_two_routes(key):
+            return False
+        return not (KEY_LANTERN_CHECK and self._one_lantern_watches_key(key))
+
+    def _key_has_two_routes(self, key: Cell) -> bool:
+        """The key isn't a dead end, and no single square cuts it off from the tunnel.
+
+        Otherwise the footprints lead the warder to the key and it simply waits
+        on the only way out. If no square (a warder or a barricade) blocks every
+        route, there are two routes that share no square, and a tunnel with one
+        way in is ruled out too. Only squares on one shortest route need trying:
+        blocking any other square leaves that route open.
+        """
+
+        exits = [cell for cell in self._neighbors(key) if self._inside(cell) and cell not in self.obstacles]
+        if len(exits) < KEY_MIN_EXITS:
+            return False
+        distance = self._distances_from(key)
+        if self.tunnel not in distance:
+            return False
+        route, cell = [], self.tunnel
+        while distance[cell] > 1:
+            cell = next(n for n in self._neighbors(cell) if distance.get(n) == distance[cell] - 1)
+            route.append(cell)
+        return all(self.tunnel in self._distances_from(key, blocked={cell}) for cell in route)
+
+    def _one_lantern_watches_key(self, key: Cell) -> bool:
+        """Is there a square two from the key whose 3x3 lantern covers every way out?
+
+        The lantern there doesn't reach the key, but every way out passes through
+        it, so the warder can wait there and grab the prisoner on the way out.
+        Spots whose lantern covers the tunnel are left out: guarding the tunnel
+        is a different problem.
+        """
+
+        for spot in self._free_cells():
+            if ring_distance(spot, key) != 2 or ring_distance(spot, self.tunnel) <= 1:
+                continue
+            lit = {(spot[0] + dr, spot[1] + dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)}
+            lit = {cell for cell in lit if clear_line(spot, cell, self.obstacles)}
+            if self.tunnel not in self._distances_from(key, blocked=lit):
+                return True
+        return False
 
     def _place_boxes(self) -> None:
         roles = self._roles()
@@ -685,8 +792,41 @@ class EscapeGame:
             player.boxes = {cell: items[i % len(items)] for i, cell in enumerate(chosen)}
             taken |= set(chosen)
 
+    def _deal_classic(self) -> tuple[Cell, Cell]:
+        """5x5 map and starts where neither side can force a win (exact solver)."""
+
+        for _ in range(CLASSIC_DEAL_TRIES):
+            self._generate_map()
+            if not self._fair_classic_map():
+                continue
+            free = self._free_cells()
+            to_tunnel = self._distances_from(self.tunnel)
+            forced = classic_outcomes(self.size, self.obstacles, self.tunnel, ALLOW_WAIT)
+            starts = []
+            for warder in free:
+                walk = self._distances_from(warder, blocked={self.tunnel})
+                for prisoner in free:
+                    if prisoner != warder and (warder, prisoner, "W") not in forced \
+                            and walk.get(prisoner, 0) >= MIN_START_GAP \
+                            and to_tunnel[prisoner] >= MIN_PRISONER_TO_TUNNEL:
+                        starts.append((warder, prisoner))
+            if starts:
+                return self.random.choice(starts)
+        return self._pick_starts(self._free_cells())    # practically never
+
+    def _fair_classic_map(self) -> bool:
+        """The tunnel isn't a dead end, and it doesn't cut the yard in two."""
+
+        entrances = [cell for cell in self._neighbors(self.tunnel)
+                     if self._inside(cell) and cell not in self.obstacles]
+        if len(entrances) < MIN_TUNNEL_ENTRANCES:
+            return False
+        free = self._free_cells()
+        # The warder can't walk through the tunnel, so it must reach every square without it.
+        return len(self._distances_from(free[0], blocked={self.tunnel})) == len(free)
+
     def _pick_starts(self, free_cells: list[Cell]) -> tuple[Cell, Cell]:
-        """Classic: random starting spots that don't hand either side a free win."""
+        """Fallback: random starting spots a fair straight-line distance apart."""
 
         fair = [
             (warder, prisoner)
@@ -718,13 +858,16 @@ class EscapeGame:
             if (row, col) not in self.obstacles and (row, col) != self.tunnel
         ]
 
-    def _distances_from(self, start: Cell) -> dict[Cell, int]:
+    def _distances_from(self, start: Cell, blocked: set[Cell] = frozenset()) -> dict[Cell, int]:
+        """Walking distance (BFS) to every square; ``blocked`` squares count as walls."""
+
         distance = {start: 0}
         pending = [start]
         while pending:
             current = pending.pop(0)
             for neighbor in self._neighbors(current):
-                if self._inside(neighbor) and neighbor not in self.obstacles and neighbor not in distance:
+                if self._inside(neighbor) and neighbor not in self.obstacles \
+                        and neighbor not in blocked and neighbor not in distance:
                     distance[neighbor] = distance[current] + 1
                     pending.append(neighbor)
         return distance
@@ -750,6 +893,29 @@ class EscapeGame:
             pid for pid in player_ids if pid != self.turn_player_id
         )
         self.turn_deadline = time.monotonic() + TURN_SECONDS
+        if self.night and self.start_hint is None and self.rounds == 0 \
+                and self.players[self.turn_player_id].role == "prisoner":
+            self._place_start_hint()
+
+    def _place_start_hint(self) -> None:
+        """Night: a random 3x3 block around the warder, for the prisoner's first turns.
+
+        It is chosen once per match. The warder can be anywhere inside it (the
+        block slides inward at the edges), and picking a fresh block for every
+        snapshot would let the prisoner intersect them to find the exact square.
+        """
+
+        row, col = self._roles()["warder"].position
+        last = self.size - START_HINT_SIZE
+        tops = range(max(0, row - START_HINT_SIZE + 1), min(row, last) + 1)
+        lefts = range(max(0, col - START_HINT_SIZE + 1), min(col, last) + 1)
+        self.start_hint = (self.random.choice(tops), self.random.choice(lefts))
+
+    def start_hint_view(self) -> dict | None:
+        if self.start_hint is None or self.status != "playing" or self.rounds >= START_HINT_TURNS:
+            return None
+        return {"top": self.start_hint[0], "left": self.start_hint[1],
+                "size": START_HINT_SIZE, "fresh": self.rounds == 0}
 
     def _set_waiting(self) -> None:
         self.status = "waiting"

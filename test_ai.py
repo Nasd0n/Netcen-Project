@@ -1,6 +1,6 @@
 import unittest
 
-from ai import suggest_move
+from ai import suggest_direction, suggest_move
 
 
 class ScoutAiTests(unittest.TestCase):
@@ -56,6 +56,28 @@ class ScoutAiTests(unittest.TestCase):
             ],
         }
         self.assertIn("your turn", suggest_move(state, "me"))
+
+    def test_scout_says_wait_when_no_route_is_open(self):
+        state = {
+            "status": "playing",
+            "turn_player_id": "p",
+            "allow_wait": True,
+            "board": [
+                "P#...",
+                "W....",
+                ".....",
+                ".....",
+                "....T",
+            ],
+            "tunnel": {"row": 4, "col": 4},
+            "players": [
+                {"id": "p", "role": "prisoner", "row": 0, "col": 0},
+                {"id": "w", "role": "warder", "row": 1, "col": 0},
+            ],
+        }
+        self.assertEqual(suggest_direction(state, "p"), "stay")
+        state["allow_wait"] = False                   # original rules: never suggest waiting
+        self.assertIsNone(suggest_direction(state, "p"))
 
 
 if __name__ == "__main__":

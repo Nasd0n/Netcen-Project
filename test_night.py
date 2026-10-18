@@ -4,10 +4,10 @@ import json
 import time
 import unittest
 
-from ai import suggest_direction
+from ai import suggest_direction, suggest_move
 from game import (
-    BARRICADE_ROUNDS, FOOTPRINT_AGE, LOCKDOWN_ROUNDS, SMOKE_TURNS, EscapeGame, manhattan,
-    ring_distance,
+    BARRICADE_ROUNDS, FOOTPRINT_AGE, LOCKDOWN_ROUNDS, SMOKE_TURNS, START_HINT_SIZE, START_HINT_TURNS,
+    EscapeGame, manhattan, ring_distance,
 )
 from solver import prisoner_forced_wins
 
@@ -325,6 +325,233 @@ class NightTests(unittest.TestCase):
         game.expire_turn()
         self.assertEqual(manhattan(before, game.players["a"].position), 1)
 
+    # ----- waiting --------------------------------------------------------
+
+    def test_prisoner_wait_ends_the_turn_like_a_step(self):
+        self.place((0, 0), (6, 6), turn="p")
+        self.game.smoke = 2
+        rounds = self.game.rounds
+        accepted, _ = self.game.move("p", "stay")
+        self.assertTrue(accepted)
+        self.assertEqual(self.prisoner.position, (6, 6))
+        self.assertEqual(self.game.turn_player_id, "w")
+        self.assertEqual(self.game.rounds, rounds + 1)          # counts toward the lockdown
+        self.assertEqual(self.game.smoke, 1)                     # smoke counts down
+        self.assertEqual(self.game.trail[-1], ((6, 6), True))    # recorded (hidden by the smoke)
+
+    def test_prisoner_wait_leaves_a_footprint(self):
+        self.place((0, 0), (6, 3), turn="p")
+        self.game.move("p", "stay")
+        for step in ("right", "right"):
+            self.game.turn_player_id = "p"
+            self.game.move("p", step)
+        self.assertEqual(self.view("w")[0]["night"]["footprints"], [[6, 3, FOOTPRINT_AGE]])
+        self.assertEqual(self.game.trail[1], ((6, 3), False))
+
+    def test_wait_counts_toward_the_lockdown(self):
+        self.place((0, 0), (6, 6), turn="p")
+        self.game.rounds = LOCKDOWN_ROUNDS - 1
+        accepted, message = self.game.move("p", "stay")
+        self.assertTrue(accepted)
+        self.assertEqual(self.game.finish_reason, "lockdown")
+        self.assertIn("Lockdown", message)
+
+    def test_wait_ends_a_sprint_and_ticks_barricades(self):
+        self.place((0, 0), (6, 6), turn="p")
+        self.prisoner.items = ["sprint"]
+        self.game.barricades = {(2, 2): 1}
+        self.game.use_item("p", "sprint")
+        self.game.move("p", "right")                 # first sprint step: still the prisoner's turn
+        self.assertEqual(self.game.turn_player_id, "p")
+        accepted, _ = self.game.move("p", "stay")    # waiting ends the sprint
+        self.assertTrue(accepted)
+        self.assertEqual(self.prisoner.position, (6, 7))
+        self.assertEqual(self.game.turn_player_id, "w")
+        self.assertEqual(self.game.sprint_steps, 0)
+        self.assertEqual(self.game.barricades, {})
+
+    def test_warder_wait_never_gives_the_extra_grab(self):
+        self.place((3, 3), (4, 4))                   # prisoner in the light at the start of the turn
+        self.game.searchlight = 2
+        accepted, _ = self.game.move("w", "stay")
+        self.assertTrue(accepted)
+        self.assertFalse(self.game.lunge)
+        self.assertEqual(self.game.status, "playing")
+        self.assertEqual(self.game.turn_player_id, "p")
+        self.assertEqual(self.game.searchlight, 1)   # the searchlight counts down as usual
+
+    def test_grabbing_at_the_start_of_the_turn_still_works(self):
+        self.place((3, 3), (4, 4))
+        accepted, _ = self.game.catch("w", [4, 4])
+        self.assertTrue(accepted)
+        self.assertEqual(self.game.winner_id, "w")
+
+    def test_no_wait_after_a_step_that_spots_them(self):
+        self.place((3, 3), (5, 4))
+        self.game.move("w", "down")                  # spotted: one click to grab
+        accepted, _ = self.game.move("w", "stay")
+        self.assertFalse(accepted)
+        self.assertTrue(self.game.lunge)
+
+    def test_hidden_wait_looks_exactly_like_a_dark_move(self):
+        def warder_turn(action):
+            game = EscapeGame(seed=5, mode="night")
+            game.add_player("w", "Wendy"); game.add_player("p", "Pat")
+            game.start_match(forced_warder_id="w")
+            game.obstacles, game.tunnel, game.key = {(0, 9), (9, 0)}, (9, 9), (0, 5)
+            for player in game.players.values():
+                player.boxes, player.items = {}, []
+            game.players["w"].position, game.players["p"].position = (1, 1), (7, 7)
+            game.trail, game.turn_player_id = [((7, 7), False)], "w"
+            game.rounds = 5                          # mid-match: the start hint is over
+            game.turn_deadline = time.monotonic() + 10
+            accepted, message = game.move("w", action)
+            self.assertTrue(accepted)
+            view = game.snapshot("p")
+            view.pop("turn_seconds_left")
+            return message, view
+
+        moved, waited = warder_turn("right"), warder_turn("stay")
+        self.assertEqual(moved[0], waited[0])
+        self.assertIn("moved in the dark", waited[0])
+        self.assertEqual(moved[1], waited[1])
+
+    def test_visible_wait_is_announced(self):
+        self.place((4, 4), (6, 6))                   # the prisoner can see the warder (2 away)
+        accepted, message = self.game.move("w", "stay")
+        self.assertTrue(accepted)
+        self.assertEqual(message, "Wendy waited. Pat's turn.")
+
+    def test_scout_can_tell_the_warder_to_wait_at_the_tunnel(self):
+        self.place((8, 9), (2, 2))                   # already guarding, prisoner out of sight
+        self.game.trail = [((2, 2), True)]
+        self.assertEqual(suggest_direction(self.game.snapshot("w"), "w"), "stay")
+
+    # ----- start hint -----------------------------------------------------
+
+    def opening(self, seed):
+        """A fresh night match after the warder's first move."""
+
+        game = EscapeGame(seed=seed, mode="night")
+        game.add_player("w", "Wendy"); game.add_player("p", "Pat")
+        game.start_match(forced_warder_id="w")
+        self.assertIsNone(game.snapshot("p")["night"]["start_hint"])   # nothing before that move
+        for step in ("up", "down", "left", "right", "stay"):
+            if game.move("w", step)[0]:
+                break
+        self.assertEqual(game.turn_player_id, "p")
+        return game
+
+    def test_prisoner_gets_a_3x3_block_holding_the_warder(self):
+        for seed in range(10):
+            game = self.opening(seed)
+            hint = game.snapshot("p")["night"]["start_hint"]
+            row, col = game.players["w"].position
+            self.assertEqual(hint["size"], START_HINT_SIZE)
+            self.assertTrue(hint["fresh"])
+            self.assertTrue(hint["top"] <= row < hint["top"] + 3 and hint["left"] <= col < hint["left"] + 3)
+            self.assertTrue(0 <= hint["top"] <= game.size - 3 and 0 <= hint["left"] <= game.size - 3)
+
+    def test_the_warder_never_gets_the_hint(self):
+        game = self.opening(4)
+        self.assertIsNone(game.snapshot("w")["night"]["start_hint"])
+
+    def test_the_hint_is_chosen_once(self):
+        game = self.opening(6)
+        first = game.snapshot("p")["night"]["start_hint"]
+        for _ in range(20):
+            self.assertEqual(game.snapshot("p")["night"]["start_hint"], first)
+        game.move("p", "stay")                        # prisoner's first turn ends
+        for step in ("up", "down", "left", "right", "stay"):
+            if game.move("w", step)[0]:               # the warder moves on...
+                break
+        faded = game.snapshot("p")["night"]["start_hint"]
+        self.assertEqual((faded["top"], faded["left"]), (first["top"], first["left"]))   # ...same block
+        self.assertFalse(faded["fresh"])
+
+    def test_the_hint_disappears_after_its_turns(self):
+        game = self.opening(7)
+        for _ in range(START_HINT_TURNS):
+            self.assertIsNotNone(game.snapshot("p")["night"]["start_hint"])
+            game.move("p", "stay")
+            game.turn_player_id = "p"                 # skip the warder's turn
+        self.assertIsNone(game.snapshot("p")["night"]["start_hint"])
+
+    def test_the_warder_is_not_always_in_the_middle(self):
+        offsets = set()
+        for seed in range(40):
+            game = self.opening(seed)
+            hint = game.snapshot("p")["night"]["start_hint"]
+            row, col = game.players["w"].position
+            offsets.add((row - hint["top"], col - hint["left"]))
+        self.assertGreater(len(offsets), 4)
+
+    def test_scout_steers_around_the_hint(self):
+        self.place((4, 5), (7, 5), turn="p")          # key at (0, 5), warder 3 away: out of sight
+        self.game.start_hint, self.game.rounds = (3, 4), 0   # block: rows 3-5, columns 4-6
+        state = self.game.snapshot("p")
+        self.assertIsNone(next(p for p in state["players"] if p["role"] == "warder")["row"])
+        direction = suggest_direction(state, "p")
+        self.assertIn(direction, {"left", "right"})   # not straight up toward the block
+        self.assertIn("around the warder's area", suggest_move(state, "p"))
+
+    # ----- walls block sight and grabs -----------------------------------
+
+    def test_no_grab_between_two_walls_that_touch_at_a_corner(self):
+        self.game.obstacles |= {(4, 5), (5, 4)}
+        self.place((4, 4), (5, 5))
+        state, roles = self.view("w")
+        self.assertIsNone(roles["prisoner"]["row"])                 # out of sight round the corner
+        accepted, message = self.game.catch("w", (5, 5))
+        self.assertFalse(accepted)
+        self.assertIn("Two walls block that corner", message)
+        self.assertEqual(self.game.status, "playing")
+        self.game.searchlight = 2                                   # even when the yard is lit
+        self.assertFalse(self.game.catch("w", (5, 5))[0])
+        self.assertNotEqual(suggest_direction(self.game.snapshot("w"), "w"), "down-right")
+        self.game.obstacles.discard((5, 4))                         # one wall: you can reach past it
+        self.assertTrue(self.game.catch("w", (5, 5))[0])
+
+    def test_a_step_round_a_corner_gives_no_grab(self):
+        self.game.obstacles |= {(4, 5), (5, 4)}
+        self.place((3, 4), (5, 5))
+        accepted, message = self.game.move("w", "down")             # now diagonal, across the corner
+        self.assertTrue(accepted)
+        self.assertFalse(self.game.lunge)
+        self.assertEqual(self.game.turn_player_id, "p")
+        self.assertIn("moved in the dark", message)
+
+    def test_smoke_guesses_cannot_reach_round_a_corner(self):
+        self.game.obstacles |= {(4, 5), (5, 4)}
+        self.place((4, 4), (5, 5))
+        self.game.smoke = 2
+        self.assertFalse(self.game.snapshot("w")["night"]["sensed"])
+        self.assertFalse(self.game.catch("w", (5, 5))[0])
+
+    def test_neither_side_sees_through_walls(self):
+        self.place((5, 7), (5, 5))
+        self.assertIsNotNone(self.view("p")[1]["warder"]["row"])    # 2 squares away, in plain view
+        self.game.obstacles.add((5, 6))
+        self.assertIsNone(self.view("p")[1]["warder"]["row"])       # a wall in between
+        self.assertNotIn("W", "".join(self.view("p")[0]["board"]))
+        self.place((6, 7), (5, 5))                                  # the line still crosses (5, 6)
+        self.assertIsNone(self.view("p")[1]["warder"]["row"])
+        self.game.obstacles = {(4, 5), (5, 4)}
+        self.place((4, 4), (5, 5), turn="p")
+        self.assertIsNone(self.view("p")[1]["warder"]["row"])       # the corner hides both ways
+        self.assertIsNone(self.view("w")[1]["prisoner"]["row"])
+
+    def test_scout_red_zone_follows_the_walls(self):
+        from ai import grab_zone
+        board = ["." * 10] * 10
+        zone = grab_zone(board, (5, 5))
+        self.assertEqual(len(zone), 21)                             # the 5x5 block minus its 4 corners
+        self.assertIn((7, 6), zone)
+        self.assertNotIn((7, 7), zone)                              # one step then a grab can't reach it
+        walled = [row[:6] + ("#" if 4 <= r <= 6 else ".") + row[7:] for r, row in enumerate(board)]
+        zone = grab_zone(walled, (5, 5))
+        self.assertFalse({(4, 7), (5, 7), (6, 7)} & zone)           # behind the wall
+
     # ----- dealing --------------------------------------------------------
 
     def test_deals_are_fair(self):
@@ -339,6 +566,70 @@ class NightTests(unittest.TestCase):
             self.assertGreaterEqual(manhattan(w, game.tunnel), 3)
             wins = prisoner_forced_wins(game.size, game.obstacles, game.tunnel, game.key)
             self.assertNotIn((w, p, 0), wins)
+
+    @staticmethod
+    def deal(seed):
+        game = EscapeGame(seed=seed, mode="night")
+        game.add_player("w", "W"); game.add_player("p", "P")
+        started = time.perf_counter()
+        game.start_match(forced_warder_id="w")
+        return game, time.perf_counter() - started
+
+    @staticmethod
+    def reaches_tunnel(game, blocked):
+        """Plain BFS from the key, with ``blocked`` as an extra wall."""
+        seen, pending = {game.key}, [game.key]
+        while pending:
+            r, c = pending.pop()
+            for cell in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if cell not in seen and cell != blocked and cell not in game.obstacles \
+                        and 0 <= cell[0] < game.size and 0 <= cell[1] < game.size:
+                    seen.add(cell)
+                    pending.append(cell)
+        return game.tunnel in seen
+
+    def test_the_key_always_has_two_separate_ways_out(self):
+        for seed in range(40):
+            game, _ = self.deal(seed)
+            key, size = game.key, game.size
+            exits = [(key[0] + dr, key[1] + dc) for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))]
+            exits = [c for c in exits if 0 <= c[0] < size and 0 <= c[1] < size and c not in game.obstacles]
+            self.assertGreaterEqual(len(exits), 2, seed)
+            self.assertTrue(self.reaches_tunnel(game, None), seed)
+            # No single square (a warder or a barricade) cuts the key off from the tunnel.
+            for row in range(size):
+                for col in range(size):
+                    if (row, col) not in game.obstacles and (row, col) not in (key, game.tunnel):
+                        self.assertTrue(self.reaches_tunnel(game, (row, col)), (seed, row, col))
+
+    def test_dead_ends_pockets_and_one_way_tunnels_are_refused(self):
+        game = self.game                                # open yard, tunnel at (9, 9)
+        self.assertTrue(game._key_has_two_routes((0, 5)))
+        game.obstacles = {(0, 1)}
+        self.assertFalse(game._key_has_two_routes((0, 0)))          # dead end: only (1, 0) is open
+        game.obstacles = {(0, 2), (1, 2), (2, 0), (2, 2)}
+        self.assertFalse(game._key_has_two_routes((0, 0)))          # pocket: (2, 1) is the only way out,
+        self.assertFalse(game._key_has_two_routes((1, 1)))          # even with two or three exits
+        game.obstacles = {(8, 9)}
+        self.assertFalse(game._key_has_two_routes((0, 5)))          # the tunnel has one way in, (9, 8)
+
+    def test_one_lantern_never_watches_every_way_out(self):
+        game = self.game
+        self.assertTrue(game._fair_key_spot((0, 5)))
+        # Two separate routes from (0, 0), but a warder on (2, 2) lights both
+        # without lighting the key: along row 0 into (1, 3), and down into (2, 1).
+        game.obstacles = {(0, 4), (1, 4), (3, 0)}
+        self.assertTrue(game._key_has_two_routes((0, 0)))
+        self.assertTrue(game._one_lantern_watches_key((0, 0)))
+        self.assertFalse(game._fair_key_spot((0, 0)))
+        for seed in range(20):
+            dealt, _ = self.deal(seed)
+            self.assertFalse(dealt._one_lantern_watches_key(dealt.key), seed)
+
+    def test_dealing_a_night_match_stays_quick(self):
+        times = [self.deal(seed)[1] for seed in range(100, 140)]
+        self.assertLess(max(times), 0.5)
+        self.assertLess(sum(times) / len(times), 0.15)
 
     # ----- Scout ----------------------------------------------------------
 

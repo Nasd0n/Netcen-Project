@@ -3,8 +3,15 @@
 Scout searches the board the player can currently see with breadth-first
 search and suggests one move. It never moves for you.
 
+In Classic both players see everything, so Scout also asks the exact game
+solver (solver.classic_outcomes) where each step leads: it takes a forced win
+when there is one, never walks into a forced loss when it can avoid it, and
+uses breadth-first distances to choose between the safe steps (the prisoner
+heads for the tunnel, the warder closes in).
+
 In Night Escape it plays by the night rules: the prisoner goes for the key
-first, then the tunnel, and stays out of the warder's step-and-grab reach (2 squares);
+first, then the tunnel, and stays out of the warder's step-and-grab reach
+(the squares it could grab now or after one step; walls block it);
 a warder who can't see the prisoner follows the footprints, or guards the
 tunnel if there are none.
 """
@@ -12,6 +19,9 @@ tunnel if there are none.
 from __future__ import annotations
 
 from collections import deque
+from functools import lru_cache
+
+from solver import classic_outcomes, reach
 
 
 DIRECTIONS = (
@@ -27,6 +37,7 @@ DIAGONALS = (
     ("down-right", (1, 1)),
 )
 ALL_NAMES = {name for name, _ in DIRECTIONS + DIAGONALS}
+WAIT = "stay"          # the move name for waiting (game.WAIT)
 
 
 def _inside(position: tuple[int, int], size: int) -> bool:
@@ -79,26 +90,44 @@ def _direction_between(start: tuple[int, int], next_position: tuple[int, int]) -
     return "stay"
 
 
-def _ring(center: tuple[int, int], size: int) -> set[tuple[int, int]]:
-    """The 3x3 block around a square (the warder's grab zone at night)."""
+def _walls(board: list[str]) -> set[tuple[int, int]]:
+    return {(r, c) for r, line in enumerate(board) for c, tile in enumerate(line) if tile == "#"}
 
+
+def grab_zone(board: list[str], warder: tuple[int, int]) -> set[tuple[int, int]]:
+    """Night: every square the warder could grab now, or after one step (walls block sight)."""
+
+    walls, size = _walls(board), len(board)
+    spots = [warder] + [
+        (warder[0] + dr, warder[1] + dc) for _, (dr, dc) in DIRECTIONS
+        if _inside((warder[0] + dr, warder[1] + dc), size)
+        and board[warder[0] + dr][warder[1] + dc] not in "#T"
+    ]
     return {
-        (center[0] + dr, center[1] + dc)
-        for dr in (-1, 0, 1)
-        for dc in (-1, 0, 1)
-        if _inside((center[0] + dr, center[1] + dc), size)
+        (spot[0] + dr, spot[1] + dc)
+        for spot in spots for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+        if _inside((spot[0] + dr, spot[1] + dc), size)
+        and reach(spot, (spot[0] + dr, spot[1] + dc), walls)
     }
 
 
-def suggest_direction(state: dict, player_id: str) -> str | None:
-    """Just the direction Scout would pick ("up", "down-left", ...), if any."""
+def advise(state: dict, player_id: str) -> tuple[str, str | None]:
+    """Scout's hint as (text, move). The move is a direction, "stay" or None."""
 
-    text = suggest_move(state, player_id) or ""
+    text = suggest_move(state, player_id) or "Scout has no idea."
     words = text.split()
+    if words and words[0].rstrip(":") == "Wait":
+        return text, WAIT
     if len(words) < 2 or words[0] not in {"Move", "Grab"}:
-        return None
+        return text, None
     word = words[1].rstrip(":").lower()
-    return word if word in ALL_NAMES else None
+    return text, (word if word in ALL_NAMES else None)
+
+
+def suggest_direction(state: dict, player_id: str) -> str | None:
+    """Just the move Scout would pick ("up", "down-left", "stay", ...), if any."""
+
+    return advise(state, player_id)[1]
 
 
 def suggest_move(state: dict, player_id: str) -> str | None:
@@ -130,6 +159,9 @@ def suggest_move(state: dict, player_id: str) -> str | None:
     if target[0] is None or target[1] is None:
         return "Scout AI cannot see the tunnel yet."
 
+    if not night and opponent_position is not None and role in ("warder", "prisoner"):
+        return _classic_advice(board, role, start, opponent_position, target, bool(state.get("allow_wait")))
+
     if role == "prisoner":
         night_info = state.get("night") or {}
         goal, goal_name = target, "tunnel"
@@ -138,20 +170,32 @@ def suggest_move(state: dict, player_id: str) -> str | None:
             blocked.add(target)                      # the tunnel is locked for now
             if night_info.get("key"):
                 goal, goal_name = tuple(night_info["key"]), "key"
+        if night and goal_name == "tunnel" and abs(goal[0] - start[0]) + abs(goal[1] - start[1]) == 1:
+            return _prisoner_text(start, [start, goal], goal, goal_name)   # out before any grab
+        hint = night_info.get("start_hint") if night else None
+        if opponent_position is None and hint:
+            # The start hint: the warder is somewhere in this block. Go around it,
+            # with a square to spare if the yard allows.
+            area = {(hint["top"] + dr, hint["left"] + dc)
+                    for dr in range(hint["size"]) for dc in range(hint["size"])}
+            wide = {(r + dr, c + dc) for r, c in area for dr in (-1, 0, 1) for dc in (-1, 0, 1)}
+            for avoid in (wide, area):
+                path = _path(board, start, goal, blocked | (avoid - {start}))
+                if path and len(path) >= 2:
+                    return _prisoner_text(start, path, goal, goal_name, " around the warder's area")
         if opponent_position is not None:
             blocked.add(opponent_position)
             if night:
-                # The warder can step once and then grab: stay 3+ squares away.
-                danger = {
-                    (r, c) for r in range(size) for c in range(size)
-                    if max(abs(r - opponent_position[0]), abs(c - opponent_position[1])) <= 2
-                }
+                # The warder can step once and then grab: stay out of that zone.
+                danger = grab_zone(board, opponent_position)
                 path = _path(board, start, goal, blocked | (danger - {start}))
                 if path and len(path) >= 2:
                     return _prisoner_text(start, path, goal, goal_name)
-                return "Every route passes too close to the warder. Wait them out, or use an item."
+                return _back_off(state, board, start, opponent_position, blocked)
         path = _path(board, start, goal, blocked)
         if path is None or len(path) < 2:
+            if state.get("allow_wait"):
+                return "Wait: no safe route to the %s is open right now." % goal_name
             return "No safe route to the %s is visible." % goal_name
         return _prisoner_text(start, path, goal, goal_name)
 
@@ -181,13 +225,17 @@ def suggest_move(state: dict, player_id: str) -> str | None:
             if best and len(best) >= 2:
                 return "Move %s: can't see them, so guard the tunnel." % (
                     _direction_between(start, best[1]).upper())
+            if state.get("allow_wait"):
+                return "Wait: you're guarding the tunnel. Stay put and listen."
             return "You're guarding the tunnel. Stay close and listen."
 
-        if night and max(abs(opponent_position[0] - start[0]), abs(opponent_position[1] - start[1])) == 1:
+        if night and reach(start, opponent_position, _walls(board)):
             return "Grab %s: click the locked-on prisoner to catch them!" % (
                 _direction_between(start, opponent_position).upper())
         path = _path(board, start, opponent_position, {target})
         if path is None or len(path) < 2:
+            if state.get("allow_wait"):
+                return "Wait: no direct route to the prisoner is open right now."
             return "No direct route to the prisoner is visible."
         direction = _direction_between(start, path[1])
         if path[1] == opponent_position:
@@ -200,14 +248,119 @@ def suggest_move(state: dict, player_id: str) -> str | None:
     return "Scout AI is waiting for your role."
 
 
-def _prisoner_text(start, path, goal, goal_name="tunnel") -> str:
+@lru_cache(maxsize=16)
+def _classic_table(size: int, walls: frozenset, tunnel: tuple[int, int], allow_wait: bool) -> dict:
+    return classic_outcomes(size, set(walls), tunnel, allow_wait)
+
+
+def _distances(board: list[str], start: tuple[int, int], blocked: set) -> dict:
+    size = len(board)
+    distance = {start: 0}
+    queue = deque([start])
+    while queue:
+        current = queue.popleft()
+        for _, (dr, dc) in DIRECTIONS:
+            cell = (current[0] + dr, current[1] + dc)
+            if _inside(cell, size) and board[cell[0]][cell[1]] != "#" \
+                    and cell not in blocked and cell not in distance:
+                distance[cell] = distance[current] + 1
+                queue.append(cell)
+    return distance
+
+
+def _classic_advice(board, role, me, other, tunnel, allow_wait) -> str:
+    """Classic: rank each step (and waiting) with the exact solver, then by distance."""
+
+    size = len(board)
+    walls = frozenset((r, c) for r in range(size) for c in range(size) if board[r][c] == "#")
+    table = _classic_table(size, walls, tunnel, allow_wait)
+    warder = role == "warder"
+    options = []
+    for name, (dr, dc) in DIRECTIONS:
+        cell = (me[0] + dr, me[1] + dc)
+        if not _inside(cell, size) or cell in walls:
+            continue
+        if warder and cell == other:
+            return "Move %s to catch the prisoner." % name.upper()
+        if not warder and cell == tunnel:
+            return "Move %s to enter the tunnel and escape." % name.upper()
+        if (warder and cell == tunnel) or (not warder and cell == other):
+            continue
+        options.append((name, cell))
+    if allow_wait:
+        options.append((WAIT, me))
+    if not options:
+        return "You have no legal step, so your turn will pass."
+
+    side, reply = ("W", "P") if warder else ("P", "W")
+    if warder:
+        distance = _distances(board, other, {tunnel})          # how close each square is to them
+    else:
+        distance = _distances(board, tunnel, {other})          # how close each square is to the tunnel
+
+    def rank(option):
+        name, cell = option
+        position = (cell, other, reply) if warder else (other, cell, reply)
+        outcome = table.get(position)
+        if outcome is None:
+            value, plies = 1, 0                               # nobody can force it from here
+        elif outcome[0] == side:
+            value, plies = 2, -outcome[1]                     # a forced win: the quicker the better
+        else:
+            value, plies = 0, outcome[1]                      # a forced loss: hold out longest
+        return value, plies, -distance.get(cell, 99), name != WAIT
+
+    name, cell = max(options, key=rank)
+    value, plies, _, _ = rank((name, cell))
+    head = "Wait" if name == WAIT else "Move %s" % name.upper()
+    if value == 2:
+        moves = -plies // 2 + 1
+        goal = "catch" if warder else "escape"
+        return "%s: you can force a%s %s in %d move%s." % (
+            head, "" if goal == "catch" else "n", goal, moves, "" if moves == 1 else "s")
+    if value == 0:
+        if warder:
+            return "%s: they can force an escape now, so make it as long as you can." % head
+        return "%s: the warder can force a catch now; this keeps you free longest." % head
+    if warder:
+        if name == WAIT:
+            return "Wait: holding still keeps the tunnel covered."
+        return "%s: closes in without letting them force an escape." % head
+    if name == WAIT:
+        return "Wait: every step toward the tunnel walks into a trap right now."
+    return "%s: the tunnel is %d steps away and this square is safe." % (head, distance.get(cell, 0) + 1)
+
+
+def _back_off(state, board, start, warder, blocked) -> str:
+    """Night prisoner with no safe route: hold still, or step away from the warder."""
+
+    night_info = state.get("night") or {}
+    barricades = {(r, c) for r, c, _ in night_info.get("barricades", [])}
+    options = [(None, start)] if state.get("allow_wait") else []
+    for name, (dr, dc) in DIRECTIONS:
+        cell = (start[0] + dr, start[1] + dc)
+        if _inside(cell, len(board)) and board[cell[0]][cell[1]] != "#" \
+                and cell not in blocked and cell not in barricades:
+            options.append((name, cell))
+    if not options:
+        return "Every route passes too close to the warder. Use an item if you have one."
+    # Furthest from the warder wins; staying put wins ties (it leaves no new footprint).
+    name, _ = max(options, key=lambda o: (max(abs(o[1][0] - warder[0]), abs(o[1][1] - warder[1])),
+                                          o[0] is None))
+    if name is None:
+        return "Wait: every route passes too close to the warder, so hold still."
+    return "Move %s: every route is too close to the warder, so back away." % name.upper()
+
+
+def _prisoner_text(start, path, goal, goal_name="tunnel", route_note="") -> str:
     direction = _direction_between(start, path[1])
     if path[1] == goal:
         if goal_name == "key":
             return "Move %s to grab the key!" % direction.upper()
         return "Move %s to enter the tunnel and escape." % direction.upper()
-    return "Move %s: shortest safe route to the %s is %d steps." % (
+    return "Move %s: shortest safe route to the %s%s is %d steps." % (
         direction.upper(),
         goal_name,
+        route_note,
         len(path) - 1,
     )

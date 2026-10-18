@@ -72,7 +72,7 @@
 
   .board-wrap { position: relative; }
   #board {
-    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); grid-template-rows: repeat(5, minmax(0, 1fr)); gap: 7px; padding: 7px;
+    position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); grid-template-rows: repeat(5, minmax(0, 1fr)); gap: 7px; padding: 7px;
     background: var(--yard-dark); border-radius: 22px; aspect-ratio: 1; touch-action: manipulation;
   }
   .cell {
@@ -107,6 +107,7 @@
   .ring .left { stroke: var(--good); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
   .ring text { font-size: 24px; font-weight: 800; fill: var(--ink); text-anchor: middle; dominant-baseline: central; }
   #turnTitle { font-size: 21px; font-weight: 800; }
+  #waitBtn { margin-top: 8px; padding: 7px 16px; font-size: 13px; }
   .box { padding: 14px 16px; }
   .box h3 { margin: 0 0 4px; font-size: 16px; }
   .box .pill { width: 100%; margin-top: 10px; }
@@ -154,6 +155,18 @@
   .big .cell { border-radius: 6px; }
   .big .cell::after, .big .cell .note { font-size: 8px !important; }
   .big .cell.zone::before { inset: 2px; border-radius: 5px; }
+  /* Night start hint: the warder is somewhere in this 3x3 block (placed on the grid area). */
+  .hintarea {
+    position: absolute; inset: 0; pointer-events: none; border-radius: 10px;
+    border: 3px solid rgba(236, 104, 80, .95); background: rgba(236, 104, 80, .2);
+    display: flex; justify-content: center; align-items: flex-start;
+  }
+  .hintarea.faded { border: 2px dashed rgba(236, 104, 80, .8); background: transparent; }
+  .hintarea span {
+    margin: 3px 3px 0; padding: 1px 6px; border-radius: 6px; background: #3b2433; color: #ffd2c8;
+    font-size: 11px; font-weight: 800; text-align: center; line-height: 1.15; max-width: calc(100% - 6px);
+  }
+  @media (max-width: 600px) { .hintarea span { font-size: 9px; padding: 1px 4px; } }
   .night .cell.seen { background: #3a4468; }
   .night .cell.seen:nth-child(odd) { background: #3d476c; }
   .cell.lockon { box-shadow: inset 0 0 0 3px var(--bad); cursor: crosshair; animation: lock 0.9s ease-in-out infinite; }
@@ -231,6 +244,7 @@
           <div id="turnTitle">Waiting...</div>
           <div id="turnHint" class="muted"></div>
           <div id="lockdown" class="lockdown hidden"></div>
+          <button class="pill hidden" id="waitBtn" disabled>Wait (Space)</button>
         </div>
       </div>
       <div class="card box">
@@ -249,7 +263,7 @@
         <h3>In the room</h3>
         <ul id="room"></ul>
         <ul id="feed"></ul>
-        <div class="keys faint">Tap a highlighted square, or use the arrow keys / WASD.</div>
+        <div class="keys faint" id="keysHelp">Tap a highlighted square, or use the arrow keys / WASD.</div>
       </div>
     </div>
   </div>
@@ -264,9 +278,46 @@ const $ = (id) => document.getElementById(id);
 const STEPS = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 const KEYS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
                w: "up", s: "down", a: "left", d: "right",
-               q: "up-left", e: "up-right", z: "down-left", c: "down-right" };
+               q: "up-left", e: "up-right", z: "down-left", c: "down-right", " ": "stay" };
 const DIAG = { "up-left": [-1, -1], "up-right": [-1, 1], "down-left": [1, -1], "down-right": [1, 1] };
 const ring = (a, b) => Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]));
+// Night sight, the same rules as solver.clear_line / reach and ai.grab_zone: walls block
+// sight, and nobody sees or grabs diagonally between two walls that touch at a corner.
+function wallSet(b) {
+  const walls = new Set();
+  b.forEach((line, r) => [...line].forEach((t, c) => { if (t === "#") walls.add(`${r},${c}`); }));
+  return walls;
+}
+function clearLine(a, b, walls) {
+  const [r0, c0] = a, [r1, c1] = b, dr = r1 - r0, dc = c1 - c0;
+  const d = 4 * Math.max(1, Math.abs(dr)) * Math.max(1, Math.abs(dc));
+  let prev = a;
+  for (let i = 1; i < d; i += 2) {   // odd samples: never on a square's edge
+    const cell = [Math.floor((2 * r0 * d + 2 * dr * i + d) / (2 * d)), Math.floor((2 * c0 * d + 2 * dc * i + d) / (2 * d))];
+    if (cell[0] !== prev[0] && cell[1] !== prev[1]
+        && walls.has(`${cell[0]},${prev[1]}`) && walls.has(`${prev[0]},${cell[1]}`)) return false;
+    const end = (cell[0] === r0 && cell[1] === c0) || (cell[0] === r1 && cell[1] === c1);
+    if (!end && walls.has(`${cell[0]},${cell[1]}`)) return false;   // the end squares never block
+    prev = cell;
+  }
+  return true;
+}
+const reach = (a, b, walls) => ring(a, b) === 1 && clearLine(a, b, walls);
+function grabZone(b, w, walls) {
+  // Every square the warder could grab now, or after one step.
+  const inside = (r, c) => r >= 0 && c >= 0 && r < b.length && c < b.length;
+  const spots = [w];
+  for (const [dr, dc] of Object.values(STEPS)) {
+    const r = w[0] + dr, c = w[1] + dc;
+    if (inside(r, c) && b[r][c] !== "#" && b[r][c] !== "T") spots.push([r, c]);
+  }
+  const zone = new Set();
+  for (const s of spots) for (const dr of [-1, 0, 1]) for (const dc of [-1, 0, 1]) {
+    const r = s[0] + dr, c = s[1] + dc;
+    if (inside(r, c) && reach(s, [r, c], walls)) zone.add(`${r},${c}`);
+  }
+  return zone;
+}
 
 /* ---------- drawings (static SVG, never includes user text) ---------- */
 const face = `<circle cx="-8" cy="-12" r="2.6" fill="#2f2a24"/><circle cx="8" cy="-12" r="2.6" fill="#2f2a24"/>
@@ -378,6 +429,12 @@ function handle(msg) {
       me = msg.you || me;
       if (msg.message) addFeed(msg.message);
       apply(msg.state || {});
+      break;
+    case "scout":
+      if (!myTurn()) break;          // the turn moved on while we waited
+      hint = msg.direction || null;
+      $("scoutText").textContent = msg.text || "Scout has no idea.";
+      renderBoard();
       break;
     case "error":
       if (inGame) { addFeed(msg.message); flash(); }
@@ -500,7 +557,8 @@ function renderTurn() {
          : night && n0?.lunge ? "You spotted them! Click the target to grab before time runs out."
          : night && role === "warder" && lockOn() ? "The prisoner is in your light! Click the target to grab."
          : night && n0?.smoke_turns && role === "warder" ? "They threw smoke. You can't see them unless they're right beside you."
-         : "Tap a highlighted square.")
+         : night && n0?.start_hint?.fresh ? "The warder is somewhere in the red block. Plan your route around it."
+         : "Tap a highlighted square." + (state.allow_wait ? " Space waits." : ""))
       : "They have 10 seconds. Plan your next step.";
   }
   const lock = $("lockdown");
@@ -527,6 +585,11 @@ function renderButtons() {
   else if (rematchSent || voters.includes(me)) { r.disabled = true; r.textContent = "Waiting for them to agree..."; }
   else { r.disabled = false; r.textContent = voters.length ? "They want a rematch - you in?" : "Rematch"; }
   $("scoutBtn").disabled = !myTurn();
+  const wait = $("waitBtn");
+  wait.classList.toggle("hidden", !(state.allow_wait && state.status === "playing"));
+  wait.disabled = !myTurn() || !!state.night?.lunge;
+  $("keysHelp").textContent = "Tap a highlighted square, or use the arrow keys / WASD."
+    + (state.allow_wait ? " Space or the Wait button stays put." : "");
 }
 
 function renderItem() {
@@ -588,7 +651,7 @@ function lockOn() {
   // The prisoner's square when the warder can click to grab it.
   const m = mine(), o = other(), n = state?.night;
   if (!n || !myTurn() || m.role !== "warder" || m.row == null || o.row == null) return null;
-  return ring([m.row, m.col], [o.row, o.col]) === 1 ? `${o.row},${o.col}` : null;
+  return reach([m.row, m.col], [o.row, o.col], wallSet(state.board || [])) ? `${o.row},${o.col}` : null;
 }
 
 function targets() {
@@ -602,9 +665,11 @@ function targets() {
     // Someone is hiding right beside you in the smoke: guess. At the start of a turn the
     // straight squares stay walkable (bumping into them catches too); after a step, all 8 are guesses.
     const around = n.lunge ? Object.values(DIAG).concat(Object.values(STEPS)) : Object.values(DIAG);
+    const walls = wallSet(b);
     for (const [dr, dc] of around) {
       const r = m.row + dr, c = m.col + dc;
       if (r < 0 || c < 0 || r >= b.length || c >= b.length || b[r][c] === "#") continue;
+      if (!reach([m.row, m.col], [r, c], walls)) continue;
       if (!out.has(`${r},${c}`)) out.set(`${r},${c}`, "blind");
     }
   }
@@ -636,7 +701,7 @@ function renderBoard() {
   document.body.classList.toggle("big", b.length > 6);
   const t = targets();
   const m = mine();
-  const hs = hint && (STEPS[hint] || DIAG[hint]);
+  const hs = hint && (hint === "stay" ? [0, 0] : STEPS[hint] || DIAG[hint]);
   const hintCell = hs && m.row != null ? `${m.row + hs[0]},${m.col + hs[1]}` : null;
   const last = state.last_move || {};
   const n = state.night;
@@ -646,14 +711,17 @@ function renderBoard() {
   const keyCell = n?.key ? n.key.join(",") : null;
   const iAmPrisoner = m.role === "prisoner";
   const prints = new Map((n?.footprints || []).map(([r, c, age]) => [`${r},${c}`, age]));
+  const walls = wallSet(b);
+  // Prisoner: the red zone is everywhere the warder could step-and-grab next turn.
+  const zone = n && iAmPrisoner && lantern ? grabZone(b, lantern, walls) : new Set();
   b.forEach((line, r) => [...line].forEach((tile, c) => {
     const cell = document.createElement("button");
     cell.className = "cell";
     if (tile === "#") cell.classList.add("wall");
-    if (n && (n.searchlight || (lantern && ring(lantern, [r, c]) <= 1))) cell.classList.add("lit");
-    else if (n && iAmPrisoner && m.row != null && ring([m.row, m.col], [r, c]) <= n.prisoner_vision) cell.classList.add("seen");
-    // Prisoner: the red zone is everywhere the warder could step-and-grab next turn.
-    if (n && iAmPrisoner && lantern && ring(lantern, [r, c]) <= 2 && tile !== "#" && tile !== "W") cell.classList.add("zone");
+    if (n && (n.searchlight || (lantern && ring(lantern, [r, c]) <= 1 && clearLine(lantern, [r, c], walls)))) cell.classList.add("lit");
+    else if (n && iAmPrisoner && m.row != null && ring([m.row, m.col], [r, c]) <= n.prisoner_vision
+             && clearLine([m.row, m.col], [r, c], walls)) cell.classList.add("seen");
+    if (zone.has(`${r},${c}`) && tile !== "#" && tile !== "W") cell.classList.add("zone");
     cell.setAttribute("role", "gridcell");
     const id = `${r},${c}`;
     let label = "open";
@@ -706,6 +774,18 @@ function renderBoard() {
     grid.append(cell);
   }));
 
+  const sh = iAmPrisoner && n?.start_hint;
+  if (sh) {
+    const area = document.createElement("div");
+    area.className = "hintarea" + (sh.fresh ? "" : " faded");
+    area.style.gridRow = `${sh.top + 1} / span ${sh.size}`;
+    area.style.gridColumn = `${sh.left + 1} / span ${sh.size}`;
+    const label = document.createElement("span");
+    label.textContent = sh.fresh ? "Warder is somewhere here" : "Last known area";
+    area.append(label);
+    grid.append(area);
+  }
+
   const done = state.status === "finished";
   $("overlay").classList.toggle("hidden", !done);
   if (done) {
@@ -724,87 +804,17 @@ function renderBoard() {
 function move(dir) { if (myTurn()) send({ type: "move", direction: dir }); }
 document.addEventListener("keydown", (e) => {
   if (!inGame || e.target === $("name")) return;
+  if (e.key === " " && e.target.closest?.("button:not(.cell)")) return;   // Space presses that button
   const dir = KEYS[e.key] || KEYS[e.key.toLowerCase?.()];
   if (dir) { e.preventDefault(); move(dir); }
 });
+$("waitBtn").onclick = () => move("stay");
 $("rematch").onclick = () => {
   if (state?.status === "finished" && !rematchSent) { rematchSent = true; send({ type: "rematch" }); renderButtons(); }
 };
 
-/* ---------- Scout (same breadth-first search as ai.py) ---------- */
-function path(b, start, goal, blocked) {
-  const key = (p) => p.join(","), prev = new Map([[key(start), null]]), queue = [start];
-  while (queue.length) {
-    const cur = queue.shift();
-    if (key(cur) === key(goal)) {
-      const out = []; let k = key(cur);
-      while (k) { out.unshift(k.split(",").map(Number)); k = prev.get(k); }
-      return out;
-    }
-    for (const [dr, dc] of Object.values(STEPS)) {
-      const n = [cur[0] + dr, cur[1] + dc];
-      if (n[0] < 0 || n[1] < 0 || n[0] >= b.length || n[1] >= b.length) continue;
-      if (prev.has(key(n)) || blocked.has(key(n)) || b[n[0]][n[1]] === "#") continue;
-      prev.set(key(n), key(cur)); queue.push(n);
-    }
-  }
-  return null;
-}
-function askScout() {
-  if (!myTurn()) return;
-  const m = mine(), o = other(), b = state.board, n = state.night;
-  const tunnel = [state.tunnel.row, state.tunnel.col], start = [m.row, m.col];
-  const say = (dir, text) => { hint = dir; $("scoutText").textContent = text; renderBoard(); };
-  const dirOf = (a, z) => [...Object.entries(STEPS), ...Object.entries(DIAG)]
-    .find(([, [dr, dc]]) => z[0] - a[0] === dr && z[1] - a[1] === dc)?.[0];
-  const seen = o.row != null;
-  if (m.role === "prisoner") {
-    const needKey = n && !n.has_key && n.key;
-    const goal = needKey ? n.key : tunnel, goalName = needKey ? "key" : "tunnel";
-    const block = new Set((n?.barricades || []).map(([r, c]) => `${r},${c}`));
-    if (n && !n.has_key) block.add(tunnel.join(","));
-    if (seen) {
-      const opp = [o.row, o.col];
-      block.add(opp.join(","));
-      if (n) for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) block.add(`${opp[0] + dr},${opp[1] + dc}`);
-      block.delete(start.join(","));
-    }
-    const route = path(b, start, goal, block);
-    if (!route || route.length < 2)
-      return say(null, n ? "Every route passes too close to the warder. Wait them out, or use an item." : "Scout can't see a clear route right now.");
-    const d = dirOf(start, route[1]), steps = route.length - 1;
-    return say(d, steps === 1 ? (needKey ? `Move ${d.toUpperCase()} to grab the key!` : `Move ${d.toUpperCase()} to enter the tunnel and escape.`)
-      : `Move ${d.toUpperCase()}: the ${goalName} is ${steps} steps away.`);
-  }
-  if (!seen) {
-    const fresh = (n?.footprints || []).slice().sort((a, z) => a[2] - z[2])[0];
-    if (fresh) {
-      const route = path(b, start, [fresh[0], fresh[1]], new Set([tunnel.join(",")]));
-      if (route && route.length >= 2) {
-        const d = dirOf(start, route[1]);
-        return say(d, `Move ${d.toUpperCase()}: follow the footprints (${route.length - 1} steps away).`);
-      }
-    }
-    let best = null;
-    for (const [dr, dc] of Object.values(STEPS)) {
-      const g = [tunnel[0] + dr, tunnel[1] + dc];
-      if (g[0] < 0 || g[1] < 0 || g[0] >= b.length || g[1] >= b.length || b[g[0]][g[1]] === "#") continue;
-      const route = path(b, start, g, new Set([tunnel.join(",")]));
-      if (route && (!best || route.length < best.length)) best = route;
-    }
-    if (best && best.length >= 2) { const d = dirOf(start, best[1]); return say(d, `Move ${d.toUpperCase()}: can't see them, so guard the tunnel.`); }
-    return say(null, "You're guarding the tunnel. Stay close.");
-  }
-  const opp = [o.row, o.col];
-  if (n && ring(start, opp) === 1) {
-    const d = dirOf(start, opp);
-    return say(d, "They're in your light! Click the target to grab them.");
-  }
-  const route = path(b, start, opp, new Set([tunnel.join(",")]));
-  if (!route || route.length < 2) return say(null, "Scout can't see a clear route right now.");
-  const d = dirOf(start, route[1]), steps = route.length - 1;
-  say(d, steps === 1 ? `Move ${d.toUpperCase()} to catch the prisoner.` : `Move ${d.toUpperCase()}: the prisoner is ${steps} steps away.`);
-}
+/* ---------- Scout: the server runs ai.py on this player's own view ---------- */
+function askScout() { if (myTurn()) send({ type: "scout" }); }
 $("scoutBtn").onclick = askScout;
 
 /* ---------- timer ring ---------- */
