@@ -19,7 +19,7 @@ from random import Random
 import time
 import unicodedata
 
-from solver import classic_outcomes, prisoner_forced_wins
+from solver import classic_outcomes, clear_line, prisoner_forced_wins, reach
 
 
 TURN_SECONDS = 10
@@ -50,6 +50,8 @@ CLASSIC_DEAL_TRIES = 30      # maps to try before falling back to the plain dist
 # Night Escape tuning (see README for the simulation results)
 LANTERN_RANGE = 1        # warder sees and catches within the 8 squares around them
 PRISONER_VISION = 2      # prisoner sees the warder one square further
+# Neither side sees through walls, and nobody grabs diagonally between two
+# walls that touch at a corner (solver.clear_line).
 FOOTPRINT_AGE = 2        # the warder sees where the prisoner stood 2 turns ago, anywhere
 SEARCHLIGHT_TURNS = 2    # the searchlight lights the yard for 2 warder turns
 SMOKE_TURNS = 3          # smoke hides the prisoner for 3 of their moves
@@ -375,7 +377,7 @@ class EscapeGame:
         if not warder or not prisoner:
             return False
         seen = self.searchlight or self.smoke == 0
-        return seen and ring_distance(warder.position, prisoner.position) <= LANTERN_RANGE
+        return seen and reach(warder.position, prisoner.position, self.obstacles)
 
     def _warder_senses(self) -> bool:
         """Prisoner hidden in smoke but right beside the warder: the warder may guess."""
@@ -384,7 +386,7 @@ class EscapeGame:
         warder, prisoner = roles.get("warder"), roles.get("prisoner")
         if not self.night or not warder or not prisoner or self.searchlight or self.smoke == 0:
             return False
-        return ring_distance(warder.position, prisoner.position) <= LANTERN_RANGE
+        return reach(warder.position, prisoner.position, self.obstacles)
 
     def catch(self, player_id: str, target: object) -> tuple[bool, str]:
         """Night Escape: the warder clicks a square next to them to grab the prisoner."""
@@ -406,6 +408,8 @@ class EscapeGame:
         if not self._inside(cell) or cell in self.obstacles \
                 or ring_distance(cell, player.position) != LANTERN_RANGE:
             return False, "You can only grab a square right next to you."
+        if not clear_line(player.position, cell, self.obstacles):
+            return False, "Two walls block that corner. You can't reach through."
 
         other = self._other(player_id)
         blind = self.smoke > 0 and not self.searchlight
@@ -498,7 +502,7 @@ class EscapeGame:
         options.sort()
         if player.role == "prisoner" and self.night:
             # A random stumble shouldn't walk straight into the lantern if avoidable.
-            safe = [o for o in options if ring_distance(o[1], other.position) > LANTERN_RANGE]
+            safe = [o for o in options if not reach(other.position, o[1], self.obstacles)]
             options = safe or options
         return options
 
@@ -554,7 +558,7 @@ class EscapeGame:
             return True
         if self.smoke > 0:
             return False
-        return ring_distance(warder.position, prisoner.position) <= LANTERN_RANGE
+        return reach(warder.position, prisoner.position, self.obstacles)
 
     def warder_visible_to_prisoner(self) -> bool:
         if not self.night or self.status != "playing":
@@ -563,7 +567,8 @@ class EscapeGame:
         warder, prisoner = roles.get("warder"), roles.get("prisoner")
         if not warder or not prisoner or warder.position is None or prisoner.position is None:
             return True
-        return ring_distance(warder.position, prisoner.position) <= PRISONER_VISION
+        return ring_distance(warder.position, prisoner.position) <= PRISONER_VISION \
+            and clear_line(prisoner.position, warder.position, self.obstacles)
 
     def footprints(self) -> list[tuple[Cell, int]]:
         """Where the prisoner stood 2 turns ago (unless smoke hid it). Visible anywhere."""
@@ -768,8 +773,9 @@ class EscapeGame:
         for spot in self._free_cells():
             if ring_distance(spot, key) != 2 or ring_distance(spot, self.tunnel) <= 1:
                 continue
-            lantern = {(spot[0] + dr, spot[1] + dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)}
-            if self.tunnel not in self._distances_from(key, blocked=lantern):
+            lit = {(spot[0] + dr, spot[1] + dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)}
+            lit = {cell for cell in lit if clear_line(spot, cell, self.obstacles)}
+            if self.tunnel not in self._distances_from(key, blocked=lit):
                 return True
         return False
 

@@ -12,7 +12,8 @@ either side may wait (when waiting is allowed), and a player with no legal
 step passes.
 
 ``prisoner_forced_wins`` is the perfect-information core of Night Escape:
-straight moves, the warder catches anything within the 8 squares around it at
+straight moves, the warder catches anything within the 8 squares around it
+that it can see (``reach``: not across two walls touching at a corner) at
 the start of its turn or right after its step, and the tunnel is locked until
 the prisoner has picked up the key. Items and darkness are left out; they
 only make a guaranteed escape harder, never easier.
@@ -28,6 +29,39 @@ STEPS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 def ring(a: Cell, b: Cell) -> int:
     return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+
+
+def clear_line(a: Cell, b: Cell, walls) -> bool:
+    """Can squares ``a`` and ``b`` see each other (Night Escape)?
+
+    The straight line between the two square centres must not cross a wall,
+    and it can't squeeze between two walls that touch at a corner. So a
+    diagonal neighbour is out of sight (and out of reach) when both squares
+    beside the diagonal are walls.
+
+    The line is sampled at odd multiples of 1/d: square edges fall on even
+    multiples, so every sample is inside one square and none is skipped.
+    """
+
+    (r0, c0), (r1, c1) = a, b
+    dr, dc = r1 - r0, c1 - c0
+    d = 4 * max(1, abs(dr)) * max(1, abs(dc))
+    previous = a
+    for i in range(1, d, 2):
+        cell = ((2 * r0 * d + 2 * dr * i + d) // (2 * d), (2 * c0 * d + 2 * dc * i + d) // (2 * d))
+        if cell[0] != previous[0] and cell[1] != previous[1] \
+                and (cell[0], previous[1]) in walls and (previous[0], cell[1]) in walls:
+            return False
+        if cell != a and cell != b and cell in walls:     # the end squares never block
+            return False
+        previous = cell
+    return True
+
+
+def reach(a: Cell, b: Cell, walls) -> bool:
+    """The warder on ``a`` lights and can grab ``b``: one of the 8 squares around it, in sight."""
+
+    return ring(a, b) == 1 and clear_line(a, b, walls)
 
 
 def classic_outcomes(size: int, walls: set[Cell], tunnel: Cell,
@@ -111,7 +145,7 @@ def prisoner_forced_wins(size: int, walls: set[Cell], tunnel: Cell, key: Cell | 
         return [x for x in nb[w] if x != tunnel and x != p]
 
     def threat(w, p):
-        return ring(w, p) <= 1 or any(ring(s, p) <= 1 for s in warder_moves(w, p))
+        return reach(w, p, walls) or any(reach(s, p, walls) for s in warder_moves(w, p))
 
     result: dict[tuple, str] = {}
     left: dict[tuple, int] = {}

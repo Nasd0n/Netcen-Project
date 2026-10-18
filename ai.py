@@ -10,7 +10,8 @@ uses breadth-first distances to choose between the safe steps (the prisoner
 heads for the tunnel, the warder closes in).
 
 In Night Escape it plays by the night rules: the prisoner goes for the key
-first, then the tunnel, and stays out of the warder's step-and-grab reach (2 squares);
+first, then the tunnel, and stays out of the warder's step-and-grab reach
+(the squares it could grab now or after one step; walls block it);
 a warder who can't see the prisoner follows the footprints, or guards the
 tunnel if there are none.
 """
@@ -20,7 +21,7 @@ from __future__ import annotations
 from collections import deque
 from functools import lru_cache
 
-from solver import classic_outcomes
+from solver import classic_outcomes, reach
 
 
 DIRECTIONS = (
@@ -89,14 +90,24 @@ def _direction_between(start: tuple[int, int], next_position: tuple[int, int]) -
     return "stay"
 
 
-def _ring(center: tuple[int, int], size: int) -> set[tuple[int, int]]:
-    """The 3x3 block around a square (the warder's grab zone at night)."""
+def _walls(board: list[str]) -> set[tuple[int, int]]:
+    return {(r, c) for r, line in enumerate(board) for c, tile in enumerate(line) if tile == "#"}
 
+
+def grab_zone(board: list[str], warder: tuple[int, int]) -> set[tuple[int, int]]:
+    """Night: every square the warder could grab now, or after one step (walls block sight)."""
+
+    walls, size = _walls(board), len(board)
+    spots = [warder] + [
+        (warder[0] + dr, warder[1] + dc) for _, (dr, dc) in DIRECTIONS
+        if _inside((warder[0] + dr, warder[1] + dc), size)
+        and board[warder[0] + dr][warder[1] + dc] not in "#T"
+    ]
     return {
-        (center[0] + dr, center[1] + dc)
-        for dr in (-1, 0, 1)
-        for dc in (-1, 0, 1)
-        if _inside((center[0] + dr, center[1] + dc), size)
+        (spot[0] + dr, spot[1] + dc)
+        for spot in spots for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+        if _inside((spot[0] + dr, spot[1] + dc), size)
+        and reach(spot, (spot[0] + dr, spot[1] + dc), walls)
     }
 
 
@@ -175,11 +186,8 @@ def suggest_move(state: dict, player_id: str) -> str | None:
         if opponent_position is not None:
             blocked.add(opponent_position)
             if night:
-                # The warder can step once and then grab: stay 3+ squares away.
-                danger = {
-                    (r, c) for r in range(size) for c in range(size)
-                    if max(abs(r - opponent_position[0]), abs(c - opponent_position[1])) <= 2
-                }
+                # The warder can step once and then grab: stay out of that zone.
+                danger = grab_zone(board, opponent_position)
                 path = _path(board, start, goal, blocked | (danger - {start}))
                 if path and len(path) >= 2:
                     return _prisoner_text(start, path, goal, goal_name)
@@ -221,7 +229,7 @@ def suggest_move(state: dict, player_id: str) -> str | None:
                 return "Wait: you're guarding the tunnel. Stay put and listen."
             return "You're guarding the tunnel. Stay close and listen."
 
-        if night and max(abs(opponent_position[0] - start[0]), abs(opponent_position[1] - start[1])) == 1:
+        if night and reach(start, opponent_position, _walls(board)):
             return "Grab %s: click the locked-on prisoner to catch them!" % (
                 _direction_between(start, opponent_position).upper())
         path = _path(board, start, opponent_position, {target})

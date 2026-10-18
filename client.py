@@ -14,9 +14,10 @@ import tkinter as tk
 from typing import Optional
 
 import security
-from ai import WAIT, advise
+from ai import WAIT, advise, grab_zone
 from config import SERVER_HOST, SERVER_PORT
 from protocol import PING_EVERY, Channel, open_tls
+from solver import clear_line, reach
 from theme import (
     BAD, CARD, FAINT, GOOD, INK, LANTERN, LANTERN_HOVER, LINE, NIGHT_BG, NIGHT_CHIP,
     NIGHT_CHIP_TEXT, NIGHT_YARD, NIGHT_YARD_ALT, PAPER, PRISONER, SOFT, SUN, SUN_SOFT,
@@ -46,6 +47,10 @@ KEYS = {
 
 def ring(a, b) -> int:
     return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+
+
+def wall_set(board) -> set:
+    return {(r, c) for r, line in enumerate(board) for c, tile in enumerate(line) if tile == "#"}
 
 
 class EscapeClient:
@@ -641,7 +646,7 @@ class EscapeClient:
         if me.get("row") is None or other.get("row") is None:
             return None
         cell = (other["row"], other["col"])
-        return cell if ring((me["row"], me["col"]), cell) == 1 else None
+        return cell if reach((me["row"], me["col"]), cell, wall_set(state.get("board", []))) else None
 
     def _targets(self) -> dict[tuple[int, int], str]:
         """Squares you can click this turn: steps, or 'catch' / 'blind' grabs."""
@@ -661,9 +666,11 @@ class EscapeClient:
             # Someone is hiding right beside you in the smoke: guess. At the start of a turn the
             # straight squares stay walkable; after a step, all 8 are guesses.
             around = list(DIAGONALS.values()) + (list(STEPS.values()) if night.get("lunge") else [])
+            walls = wall_set(board)
             for dr, dc in around:
                 r, c = me["row"] + dr, me["col"] + dc
-                if 0 <= r < len(board) and 0 <= c < len(board) and board[r][c] != "#":
+                if 0 <= r < len(board) and 0 <= c < len(board) and board[r][c] != "#" \
+                        and reach((me["row"], me["col"]), (r, c), walls):
                     result.setdefault((r, c), "blind")
         if night.get("lunge"):
             return result                      # after a step that spots them: grab only
@@ -735,6 +742,9 @@ class EscapeClient:
             span = range(start_hint["size"])
             hint_area = {(start_hint["top"] + dr, start_hint["left"] + dc) for dr in span for dc in span}
         vision = night.get("prisoner_vision", 2)
+        walls = wall_set(board)
+        # Prisoner's red zone: everywhere the warder could step-and-grab next turn.
+        zone = grab_zone(board, lantern) if (night and i_am_prisoner and lantern) else set()
         radius = 12 if size <= 6 else 6
         small = size > 6
 
@@ -744,12 +754,14 @@ class EscapeClient:
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                 cell = x2 - x1
                 lit = bool(night) and (night.get("searchlight") or
-                                       (lantern is not None and ring(lantern, (r, c)) <= 1))
+                                       (lantern is not None and ring(lantern, (r, c)) <= 1
+                                        and clear_line(lantern, (r, c), walls)))
                 if tile == "#":
                     draw_wall(canvas, x1, y1, x2, y2, dim=bool(night) and not lit)
                     continue
                 if night:
-                    seen = i_am_prisoner and mine is not None and ring(mine, (r, c)) <= vision
+                    seen = i_am_prisoner and mine is not None and ring(mine, (r, c)) <= vision \
+                        and clear_line(mine, (r, c), walls)
                     fill = LANTERN if lit else ("#3a4468" if seen else
                                                 (NIGHT_YARD if (r + c) % 2 == 0 else NIGHT_YARD_ALT))
                     if (r, c) in hint_area and not lit and start_hint["fresh"]:
@@ -763,8 +775,7 @@ class EscapeClient:
                     if (r, c) in targets and (r, c) == self.hover_cell:
                         fill = SUN_SOFT
                 rounded_rect(canvas, x1, y1, x2, y2, radius=radius, fill=fill, outline="")
-                # Prisoner's red zone: everywhere the warder could step-and-grab next turn.
-                if night and i_am_prisoner and lantern and ring(lantern, (r, c)) <= 2 and tile != "W":
+                if (r, c) in zone and tile != "W":
                     rounded_rect(canvas, x1 + 3, y1 + 3, x2 - 3, y2 - 3, radius=max(3, radius - 3),
                                  fill="", outline=ZONE, width=2, dash=(4, 3))
                 if (r, c) in placeable:

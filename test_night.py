@@ -495,6 +495,63 @@ class NightTests(unittest.TestCase):
         self.assertIn(direction, {"left", "right"})   # not straight up toward the block
         self.assertIn("around the warder's area", suggest_move(state, "p"))
 
+    # ----- walls block sight and grabs -----------------------------------
+
+    def test_no_grab_between_two_walls_that_touch_at_a_corner(self):
+        self.game.obstacles |= {(4, 5), (5, 4)}
+        self.place((4, 4), (5, 5))
+        state, roles = self.view("w")
+        self.assertIsNone(roles["prisoner"]["row"])                 # out of sight round the corner
+        accepted, message = self.game.catch("w", (5, 5))
+        self.assertFalse(accepted)
+        self.assertIn("Two walls block that corner", message)
+        self.assertEqual(self.game.status, "playing")
+        self.game.searchlight = 2                                   # even when the yard is lit
+        self.assertFalse(self.game.catch("w", (5, 5))[0])
+        self.assertNotEqual(suggest_direction(self.game.snapshot("w"), "w"), "down-right")
+        self.game.obstacles.discard((5, 4))                         # one wall: you can reach past it
+        self.assertTrue(self.game.catch("w", (5, 5))[0])
+
+    def test_a_step_round_a_corner_gives_no_grab(self):
+        self.game.obstacles |= {(4, 5), (5, 4)}
+        self.place((3, 4), (5, 5))
+        accepted, message = self.game.move("w", "down")             # now diagonal, across the corner
+        self.assertTrue(accepted)
+        self.assertFalse(self.game.lunge)
+        self.assertEqual(self.game.turn_player_id, "p")
+        self.assertIn("moved in the dark", message)
+
+    def test_smoke_guesses_cannot_reach_round_a_corner(self):
+        self.game.obstacles |= {(4, 5), (5, 4)}
+        self.place((4, 4), (5, 5))
+        self.game.smoke = 2
+        self.assertFalse(self.game.snapshot("w")["night"]["sensed"])
+        self.assertFalse(self.game.catch("w", (5, 5))[0])
+
+    def test_neither_side_sees_through_walls(self):
+        self.place((5, 7), (5, 5))
+        self.assertIsNotNone(self.view("p")[1]["warder"]["row"])    # 2 squares away, in plain view
+        self.game.obstacles.add((5, 6))
+        self.assertIsNone(self.view("p")[1]["warder"]["row"])       # a wall in between
+        self.assertNotIn("W", "".join(self.view("p")[0]["board"]))
+        self.place((6, 7), (5, 5))                                  # the line still crosses (5, 6)
+        self.assertIsNone(self.view("p")[1]["warder"]["row"])
+        self.game.obstacles = {(4, 5), (5, 4)}
+        self.place((4, 4), (5, 5), turn="p")
+        self.assertIsNone(self.view("p")[1]["warder"]["row"])       # the corner hides both ways
+        self.assertIsNone(self.view("w")[1]["prisoner"]["row"])
+
+    def test_scout_red_zone_follows_the_walls(self):
+        from ai import grab_zone
+        board = ["." * 10] * 10
+        zone = grab_zone(board, (5, 5))
+        self.assertEqual(len(zone), 21)                             # the 5x5 block minus its 4 corners
+        self.assertIn((7, 6), zone)
+        self.assertNotIn((7, 7), zone)                              # one step then a grab can't reach it
+        walled = [row[:6] + ("#" if 4 <= r <= 6 else ".") + row[7:] for r, row in enumerate(board)]
+        zone = grab_zone(walled, (5, 5))
+        self.assertFalse({(4, 7), (5, 7), (6, 7)} & zone)           # behind the wall
+
     # ----- dealing --------------------------------------------------------
 
     def test_deals_are_fair(self):

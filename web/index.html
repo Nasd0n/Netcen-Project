@@ -281,6 +281,43 @@ const KEYS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: 
                q: "up-left", e: "up-right", z: "down-left", c: "down-right", " ": "stay" };
 const DIAG = { "up-left": [-1, -1], "up-right": [-1, 1], "down-left": [1, -1], "down-right": [1, 1] };
 const ring = (a, b) => Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]));
+// Night sight, the same rules as solver.clear_line / reach and ai.grab_zone: walls block
+// sight, and nobody sees or grabs diagonally between two walls that touch at a corner.
+function wallSet(b) {
+  const walls = new Set();
+  b.forEach((line, r) => [...line].forEach((t, c) => { if (t === "#") walls.add(`${r},${c}`); }));
+  return walls;
+}
+function clearLine(a, b, walls) {
+  const [r0, c0] = a, [r1, c1] = b, dr = r1 - r0, dc = c1 - c0;
+  const d = 4 * Math.max(1, Math.abs(dr)) * Math.max(1, Math.abs(dc));
+  let prev = a;
+  for (let i = 1; i < d; i += 2) {   // odd samples: never on a square's edge
+    const cell = [Math.floor((2 * r0 * d + 2 * dr * i + d) / (2 * d)), Math.floor((2 * c0 * d + 2 * dc * i + d) / (2 * d))];
+    if (cell[0] !== prev[0] && cell[1] !== prev[1]
+        && walls.has(`${cell[0]},${prev[1]}`) && walls.has(`${prev[0]},${cell[1]}`)) return false;
+    const end = (cell[0] === r0 && cell[1] === c0) || (cell[0] === r1 && cell[1] === c1);
+    if (!end && walls.has(`${cell[0]},${cell[1]}`)) return false;   // the end squares never block
+    prev = cell;
+  }
+  return true;
+}
+const reach = (a, b, walls) => ring(a, b) === 1 && clearLine(a, b, walls);
+function grabZone(b, w, walls) {
+  // Every square the warder could grab now, or after one step.
+  const inside = (r, c) => r >= 0 && c >= 0 && r < b.length && c < b.length;
+  const spots = [w];
+  for (const [dr, dc] of Object.values(STEPS)) {
+    const r = w[0] + dr, c = w[1] + dc;
+    if (inside(r, c) && b[r][c] !== "#" && b[r][c] !== "T") spots.push([r, c]);
+  }
+  const zone = new Set();
+  for (const s of spots) for (const dr of [-1, 0, 1]) for (const dc of [-1, 0, 1]) {
+    const r = s[0] + dr, c = s[1] + dc;
+    if (inside(r, c) && reach(s, [r, c], walls)) zone.add(`${r},${c}`);
+  }
+  return zone;
+}
 
 /* ---------- drawings (static SVG, never includes user text) ---------- */
 const face = `<circle cx="-8" cy="-12" r="2.6" fill="#2f2a24"/><circle cx="8" cy="-12" r="2.6" fill="#2f2a24"/>
@@ -614,7 +651,7 @@ function lockOn() {
   // The prisoner's square when the warder can click to grab it.
   const m = mine(), o = other(), n = state?.night;
   if (!n || !myTurn() || m.role !== "warder" || m.row == null || o.row == null) return null;
-  return ring([m.row, m.col], [o.row, o.col]) === 1 ? `${o.row},${o.col}` : null;
+  return reach([m.row, m.col], [o.row, o.col], wallSet(state.board || [])) ? `${o.row},${o.col}` : null;
 }
 
 function targets() {
@@ -628,9 +665,11 @@ function targets() {
     // Someone is hiding right beside you in the smoke: guess. At the start of a turn the
     // straight squares stay walkable (bumping into them catches too); after a step, all 8 are guesses.
     const around = n.lunge ? Object.values(DIAG).concat(Object.values(STEPS)) : Object.values(DIAG);
+    const walls = wallSet(b);
     for (const [dr, dc] of around) {
       const r = m.row + dr, c = m.col + dc;
       if (r < 0 || c < 0 || r >= b.length || c >= b.length || b[r][c] === "#") continue;
+      if (!reach([m.row, m.col], [r, c], walls)) continue;
       if (!out.has(`${r},${c}`)) out.set(`${r},${c}`, "blind");
     }
   }
@@ -672,14 +711,17 @@ function renderBoard() {
   const keyCell = n?.key ? n.key.join(",") : null;
   const iAmPrisoner = m.role === "prisoner";
   const prints = new Map((n?.footprints || []).map(([r, c, age]) => [`${r},${c}`, age]));
+  const walls = wallSet(b);
+  // Prisoner: the red zone is everywhere the warder could step-and-grab next turn.
+  const zone = n && iAmPrisoner && lantern ? grabZone(b, lantern, walls) : new Set();
   b.forEach((line, r) => [...line].forEach((tile, c) => {
     const cell = document.createElement("button");
     cell.className = "cell";
     if (tile === "#") cell.classList.add("wall");
-    if (n && (n.searchlight || (lantern && ring(lantern, [r, c]) <= 1))) cell.classList.add("lit");
-    else if (n && iAmPrisoner && m.row != null && ring([m.row, m.col], [r, c]) <= n.prisoner_vision) cell.classList.add("seen");
-    // Prisoner: the red zone is everywhere the warder could step-and-grab next turn.
-    if (n && iAmPrisoner && lantern && ring(lantern, [r, c]) <= 2 && tile !== "#" && tile !== "W") cell.classList.add("zone");
+    if (n && (n.searchlight || (lantern && ring(lantern, [r, c]) <= 1 && clearLine(lantern, [r, c], walls)))) cell.classList.add("lit");
+    else if (n && iAmPrisoner && m.row != null && ring([m.row, m.col], [r, c]) <= n.prisoner_vision
+             && clearLine([m.row, m.col], [r, c], walls)) cell.classList.add("seen");
+    if (zone.has(`${r},${c}`) && tile !== "#" && tile !== "W") cell.classList.add("zone");
     cell.setAttribute("role", "gridcell");
     const id = `${r},${c}`;
     let label = "open";
